@@ -1,0 +1,17 @@
+# Godot 4+ engine-generated cache (regenerated on open)
+.godot/
+
+# Mono/.NET (unused here, kept for safety)
+.mono/
+data_*/
+
+# Exports & builds
+build/
+export_presets.cfg
+*.apk
+*.aab
+
+# Temp / OS / editor cruft
+*.tmp
+.DS_Store
+Thumbs.db
