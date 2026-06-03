@@ -11,6 +11,10 @@ export_presets.cfg
 *.apk
 *.aab
 
+# Godot Android Gradle build template (regenerable: Project ▸ Install Android
+# Build Template, or `--install-android-build-template`)
+/android/
+
 # Temp / OS / editor cruft
 *.tmp
 .DS_Store

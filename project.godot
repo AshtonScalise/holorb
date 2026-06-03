@@ -17,6 +17,7 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 config/name="Holorb"
 run/main_scene="res://Main.tscn"
 config/features=PackedStringArray("4.6")
+config/icon="res://icon.png"
 
 [autoload]
 
@@ -35,3 +36,4 @@ window/handheld/orientation=1
 
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
+textures/vram_compression/import_etc2_astc=true

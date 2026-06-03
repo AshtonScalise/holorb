@@ -1,14 +1,19 @@
 extends Node
 ## Ad + in-app-purchase layer (autoload singleton "Ads").
 ##
-## The PUBLIC API is platform-agnostic. On Android, when the AdMob and Google
-## Play Billing plugins are installed, real ads / purchases are used. On desktop
-## (or whenever a plugin is missing) it falls back to stubs so the game stays
-## fully playable in the editor.
+## The PUBLIC API is platform-agnostic. On MOBILE (Android + iOS), when the
+## AdMob and store-billing plugins are installed, real ads / purchases are used.
+## On desktop / in the editor (or whenever a plugin is missing) it falls back to
+## stubs so the game stays fully playable.
 ##
-## The native plugins are AARs compiled into the Android export -- they don't
-## exist in the editor, so all plugin access is guarded behind OS/singleton
-## checks and never runs on desktop. See ANDROID_SETUP.md for install steps.
+## Ads use Google AdMob on BOTH Android and iOS (the Google Mobile Ads SDK ships
+## for both; a cross-platform Godot AdMob plugin exposes one "AdMob" singleton).
+## "Remove Ads" billing differs per store: Google Play Billing on Android,
+## StoreKit on iOS -- both are funnelled through the same public API below.
+##
+## The native plugins are compiled into the mobile export -- they don't exist in
+## the editor, so all plugin access is guarded behind OS/singleton checks and
+## never runs on desktop. See ANDROID_SETUP.md and IOS_SETUP.md for install steps.
 
 signal rewarded_completed(reward_granted: bool)
 signal ads_removed_changed(removed: bool)
@@ -31,10 +36,11 @@ const REAL_REWARDED_ID := "ca-app-pub-0000000000000000/0000000000"
 ## (must match the product you create in the Play Console).
 const REMOVE_ADS_PRODUCT := "remove_ads"
 
-## Engine singleton names registered by the plugins. If your AdMob plugin
-## registers a different name, change it here (see its README / export logs).
-const ADMOB_SINGLETON := "AdMob"
-const BILLING_SINGLETON := "GodotGooglePlayBilling"
+## Engine singleton names registered by the plugins. If your plugin registers a
+## different name, change it here (see its README / export logs).
+const ADMOB_SINGLETON := "AdMob"                      # AdMob plugin (Android + iOS)
+const BILLING_SINGLETON := "GodotGooglePlayBilling"   # Android: Google Play Billing
+const IOS_IAP_SINGLETON := "InAppStore"               # iOS: StoreKit (godot-ios-plugins)
 # =============================================================================
 
 ## Show an interstitial once every this many plays (a "play" = one run started).
@@ -44,23 +50,30 @@ const SAVE_PATH := "user://ads.save"
 var ads_removed := false
 var _play_count := 0
 
-# --- backend state (Android only; stay null/false on desktop) ---
+# --- backend state (mobile only; stay null/false on desktop) ---
 var _admob = null
-var _billing = null
+var _billing = null      # Android Google Play Billing singleton
+var _ios_iap = null      # iOS StoreKit singleton
 var _interstitial_loaded := false
 var _rewarded_loaded := false
 var _reward_earned := false  # set when the user earns a rewarded ad's reward
 
 func _ready() -> void:
+	set_process(false)  # only iOS billing needs per-frame polling (enabled below)
 	_load()
 	_init_admob()
 	_init_billing()
+
+## True on a real phone/tablet (Android or iOS), false in the editor / desktop.
+func _is_mobile() -> bool:
+	var n := OS.get_name()
+	return n == "Android" or n == "iOS"
 
 func _has_admob() -> bool:
 	return _admob != null
 
 func _has_billing() -> bool:
-	return _billing != null
+	return _billing != null or _ios_iap != null
 
 func _interstitial_id() -> String:
 	return TEST_INTERSTITIAL_ID if USE_TEST_ADS else REAL_INTERSTITIAL_ID
@@ -75,7 +88,7 @@ func _connect_if(obj, sig: String, cb: Callable) -> void:
 # ================================ AdMob ======================================
 
 func _init_admob() -> void:
-	if OS.get_name() != "Android":
+	if not _is_mobile():
 		return
 	if not Engine.has_singleton(ADMOB_SINGLETON):
 		push_warning("[Ads] AdMob singleton '%s' not found -- ads disabled." % ADMOB_SINGLETON)
@@ -136,16 +149,28 @@ func _on_rewarded_dismissed(_a = null) -> void:
 # ============================= Remove Ads (IAP) ==============================
 
 func purchase_remove_ads() -> void:
-	if _has_billing() and _billing.has_method("purchase"):
-		_billing.purchase(REMOVE_ADS_PRODUCT)  # grant on purchases_updated callback
+	# Android (Google Play Billing): grant arrives via the purchases_updated callback.
+	if _billing != null and _billing.has_method("purchase"):
+		_billing.purchase(REMOVE_ADS_PRODUCT)
 		return
-	# Desktop stub: simulate an instant successful purchase.
-	print("[Ads] purchase_remove_ads (stub) -> granting")
-	_grant_remove_ads()
+	# iOS (StoreKit): grant arrives via the polled pending-event queue.
+	if _ios_iap != null and _ios_iap.has_method("purchase"):
+		_ios_iap.purchase({"product_id": REMOVE_ADS_PRODUCT})
+		return
+	# Editor / desktop stub: simulate an instant successful purchase. Never
+	# auto-grant on a real device with no billing backend (that'd be a free unlock).
+	if not _is_mobile():
+		print("[Ads] purchase_remove_ads (stub) -> granting")
+		_grant_remove_ads()
+	else:
+		push_warning("[Ads] No billing backend available -- purchase unavailable.")
 
 func restore_purchases() -> void:
-	if _has_billing() and _billing.has_method("queryPurchases"):
+	if _billing != null and _billing.has_method("queryPurchases"):
 		_billing.queryPurchases("inapp")
+		return
+	if _ios_iap != null and _ios_iap.has_method("restore_purchases"):
+		_ios_iap.restore_purchases()
 		return
 	print("[Ads] restore_purchases (stub)")
 
@@ -159,8 +184,14 @@ func _grant_remove_ads() -> void:
 # ================================ Billing ====================================
 
 func _init_billing() -> void:
-	if OS.get_name() != "Android":
-		return
+	match OS.get_name():
+		"Android":
+			_init_billing_android()
+		"iOS":
+			_init_billing_ios()
+
+# --- Android: Google Play Billing (signal-based) ---
+func _init_billing_android() -> void:
 	if not Engine.has_singleton(BILLING_SINGLETON):
 		push_warning("[Ads] Billing singleton '%s' not found -- IAP disabled." % BILLING_SINGLETON)
 		return
@@ -171,6 +202,40 @@ func _init_billing() -> void:
 	_connect_if(_billing, "purchase_acknowledged", _on_purchase_acknowledged)
 	if _billing.has_method("startConnection"):
 		_billing.startConnection()
+
+# --- iOS: StoreKit (poll-based; the plugin queues events we drain in _process) ---
+func _init_billing_ios() -> void:
+	if not Engine.has_singleton(IOS_IAP_SINGLETON):
+		push_warning("[Ads] iOS IAP singleton '%s' not found -- IAP disabled." % IOS_IAP_SINGLETON)
+		return
+	_ios_iap = Engine.get_singleton(IOS_IAP_SINGLETON)
+	set_process(true)  # drain StoreKit events each frame
+	# Restore any previously-owned "remove ads" entitlement on launch.
+	if _ios_iap.has_method("restore_purchases"):
+		_ios_iap.restore_purchases()
+
+func _process(_delta: float) -> void:
+	# Only iOS StoreKit needs polling; set_process is off otherwise.
+	if _ios_iap == null:
+		return
+	if not _ios_iap.has_method("get_pending_event_count"):
+		return
+	while _ios_iap.get_pending_event_count() > 0:
+		_handle_ios_iap_event(_ios_iap.get_pending_event())
+
+func _handle_ios_iap_event(event) -> void:
+	if typeof(event) != TYPE_DICTIONARY:
+		return
+	var type: String = str(event.get("type", ""))
+	var result: String = str(event.get("result", ""))
+	var product_id: String = str(event.get("product_id", ""))
+	# A successful purchase or restore of our product grants the entitlement.
+	if (type == "purchase" or type == "restore") and result == "ok" \
+			and product_id == REMOVE_ADS_PRODUCT:
+		_grant_remove_ads()
+		# Tell StoreKit the transaction is handled so it isn't re-delivered.
+		if _ios_iap.has_method("finish_transaction"):
+			_ios_iap.finish_transaction(product_id)
 
 func _on_billing_connected() -> void:
 	# Restore any previously-owned "remove ads" entitlement.
@@ -222,16 +287,19 @@ func show_interstitial() -> bool:
 			return true
 		_load_interstitial()  # wasn't ready; load for next time
 		return false
-	# Desktop stub.
-	print("[Ads] interstitial shown (stub)")
-	return true
+	# Editor / desktop stub (pretend an ad ran). On a device with no AdMob,
+	# don't fake it -- report "no ad shown" so the post-ad card is skipped.
+	if not _is_mobile():
+		print("[Ads] interstitial shown (stub)")
+		return true
+	return false
 
 # ------------------------------------------------------- Rewarded (revive etc.)
 
 func is_rewarded_ready() -> bool:
 	if _has_admob():
 		return _rewarded_loaded
-	return true  # stub: always "ready" on desktop
+	return not _is_mobile()  # stub "ready" only in the editor / desktop
 
 func show_rewarded() -> void:
 	if _has_admob():
@@ -242,9 +310,13 @@ func show_rewarded() -> void:
 			_load_rewarded()
 			rewarded_completed.emit(false)  # nothing to show -> no reward
 		return
-	# Desktop stub: grant instantly.
-	print("[Ads] rewarded shown (stub) -> reward granted")
-	rewarded_completed.emit(true)
+	# Editor / desktop stub: grant instantly so the flow is testable. On a real
+	# device with no AdMob, emit "no reward" instead of handing out a free one.
+	if not _is_mobile():
+		print("[Ads] rewarded shown (stub) -> reward granted")
+		rewarded_completed.emit(true)
+	else:
+		rewarded_completed.emit(false)
 
 # ----------------------------------------------------------------- Persistence
 

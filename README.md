@@ -7,6 +7,8 @@ coins during runs and spend them on procedurally-generated ball skins.
 - Portrait, touch-first (drag to move)
 - Endless, speed ramps with score
 - Coin pickups + skin shop
-- Rewarded-ad coins, gated interstitials, remove-ads IAP (see `ANDROID_SETUP.md`)
+- Rewarded-ad coins, gated interstitials, remove-ads IAP
+- Cross-platform ads/IAP: AdMob on Android **and** iOS; Google Play Billing /
+  StoreKit for "Remove Ads" (see `ANDROID_SETUP.md` and `IOS_SETUP.md`)
 
-Built for Android.
+Built for Android and iOS.
