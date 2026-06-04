@@ -24,6 +24,10 @@ config/icon="res://icon.png"
 Ads="*res://scripts/Ads.gd"
 Profile="*res://scripts/Profile.gd"
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/admob/plugin.cfg")
+
 [display]
 
 window/size/viewport_width=720
