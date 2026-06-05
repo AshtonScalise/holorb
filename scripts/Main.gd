@@ -1,6 +1,6 @@
 extends Node3D
 
-enum State { MENU, PLAYING, GAMEOVER, SHOP, POSTAD }
+enum State { MENU, PLAYING, GAMEOVER, SHOP, OUTOFLIVES }
 
 const AD_COINS_REWARD := 50
 const COIN_VOL := -4.0
@@ -35,8 +35,6 @@ var menu_root: Control
 var gameover_root: Control
 var final_label: Label
 var best_label: Label
-var revive_btn: Button
-var remove_ads_btn: Button
 var menu_btn: Button
 var coin_label: Label
 var coin_hud: HBoxContainer
@@ -45,11 +43,26 @@ var coins_gained_label: Label
 var shop_root: Control
 var shop_coin_label: Label
 var _skin_buttons := {}
+# Shop tabs (skins vs consumables) + item widgets
+var shop_tab_skins_btn: Button
+var shop_tab_items_btn: Button
+var skins_view: VBoxContainer
+var items_view: VBoxContainer
+var shield_owned_label: Label
+var shield_buy_btn: Button
+var roll_btn: Button
 
-# Ads / IAP
-var _revived_this_run := false
-var _reward_action := ""  # "revive" or "coins" -- what the next rewarded ad is for
-var postad_root: Control
+# Lives + shields HUD
+var lives_hud: HBoxContainer
+var lives_count_label: Label
+var shield_hud: HBoxContainer
+var shield_count_label: Label
+
+# Ads / IAP -- the out-of-lives gate (watch ad for lives, or buy Unlimited Lives)
+var _reward_action := ""  # "lives" or "coins" -- what the next rewarded ad is for
+var outoflives_root: Control
+var oot_watch_btn: Button
+var oot_timer_label: Label
 var ad_coins_btn: Button
 
 # Audio
@@ -68,6 +81,7 @@ func _ready() -> void:
 	_build_ui()
 	_update_hud_ball()
 	best = _load_best()
+	Profile.refill_if_new_day()
 	Ads.rewarded_completed.connect(_on_rewarded_completed)
 	Ads.ads_removed_changed.connect(_on_ads_removed_changed)
 	_set_state(State.MENU)
@@ -244,99 +258,226 @@ func _build_ui() -> void:
 	var sp2 := Control.new()
 	sp2.custom_minimum_size = Vector2(0, 40)
 	gv.add_child(sp2)
-	revive_btn = _make_button("REVIVE  (Watch Ad)", 38)
-	revive_btn.pressed.connect(_on_revive_pressed)
-	gv.add_child(revive_btn)
 	var retry_btn := _make_button("RETRY", 38, true)
 	retry_btn.pressed.connect(_start_game)
 	gv.add_child(retry_btn)
 	menu_btn = _make_button("MENU", 34)
 	menu_btn.pressed.connect(_go_to_menu)
 	gv.add_child(menu_btn)
-	remove_ads_btn = _make_button("Remove Ads", 30)
-	remove_ads_btn.pressed.connect(_on_remove_ads_pressed)
-	gv.add_child(remove_ads_btn)
+
+	# Persistent lives counter (heart + "n / max"), shown on menu & game-over.
+	lives_hud = HBoxContainer.new()
+	lives_hud.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	lives_hud.offset_top = 40
+	lives_hud.offset_bottom = 108
+	lives_hud.alignment = BoxContainer.ALIGNMENT_CENTER
+	lives_hud.add_theme_constant_override("separation", 10)
+	lives_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(lives_hud)
+	var heart := TextureRect.new()
+	heart.texture = _make_heart_icon(56)
+	heart.custom_minimum_size = Vector2(56, 56)
+	heart.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	heart.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lives_hud.add_child(heart)
+	lives_count_label = _make_label("5 / 5", 44)
+	lives_count_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.55))
+	lives_hud.add_child(lives_count_label)
+
+	# Shield counter (kite shield + "xN"), top-left during a run when you have any.
+	shield_hud = HBoxContainer.new()
+	shield_hud.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	shield_hud.position = Vector2(30, 138)
+	shield_hud.add_theme_constant_override("separation", 6)
+	shield_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	ui.add_child(shield_hud)
+	var shield_icon := TextureRect.new()
+	shield_icon.texture = _make_shield_icon(60)
+	shield_icon.custom_minimum_size = Vector2(60, 60)
+	shield_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	shield_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shield_hud.add_child(shield_icon)
+	shield_count_label = _make_label("x0", 40)
+	shield_count_label.add_theme_color_override("font_color", Color(0.78, 0.85, 1.0))
+	shield_hud.add_child(shield_count_label)
 
 	_build_shop()
-	_build_postad()
+	_build_outoflives()
 
-# Card shown right after an interstitial ad: upsell Remove Ads, or carry on.
-func _build_postad() -> void:
-	postad_root = _make_screen()
+# Out-of-lives gate: shown when the player has 0 lives. They can watch a rewarded
+# ad for more lives, buy Unlimited Lives, or wait for the daily refill. Never forced.
+func _build_outoflives() -> void:
+	outoflives_root = _make_screen()
 	var bg := ColorRect.new()
 	bg.color = Color(0.05, 0.06, 0.10, 0.96)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_STOP
-	postad_root.add_child(bg)
-	ui.add_child(postad_root)
+	outoflives_root.add_child(bg)
+	ui.add_child(outoflives_root)
 
-	var v := _make_vbox(postad_root)
-	v.add_child(_make_label("Thanks for playing!", 52))
-	var sub := _make_label("Ads keep Holorb free", 32)
-	sub.add_theme_color_override("font_color", Color(0.7, 0.74, 0.85))
-	v.add_child(sub)
+	var v := _make_vbox(outoflives_root)
+	v.add_child(_make_label("OUT OF LIVES", 64))
+	oot_timer_label = _make_label("", 32)
+	oot_timer_label.add_theme_color_override("font_color", Color(0.7, 0.74, 0.85))
+	v.add_child(oot_timer_label)
 	var sp := Control.new()
-	sp.custom_minimum_size = Vector2(0, 50)
+	sp.custom_minimum_size = Vector2(0, 40)
 	v.add_child(sp)
-	var play_on := _make_button("TRY AGAIN", 40, true)
-	play_on.pressed.connect(_begin_run)
-	v.add_child(play_on)
-	var rm := _make_button("REMOVE ADS", 34)
-	rm.pressed.connect(_on_remove_ads_from_card)
-	v.add_child(rm)
+	oot_watch_btn = _make_button("WATCH AD    +%d  LIVES" % Profile.LIVES_PER_AD, 36, true)
+	oot_watch_btn.pressed.connect(_on_watch_ad_lives)
+	v.add_child(oot_watch_btn)
+	var unl := _make_button("UNLIMITED LIVES", 32)
+	unl.pressed.connect(_on_buy_unlimited)
+	v.add_child(unl)
+	var back := _make_button("MENU", 30)
+	back.pressed.connect(_go_to_menu)
+	v.add_child(back)
 
 func _build_shop() -> void:
 	shop_root = _make_screen()
 	# Opaque-ish backdrop so the shop is readable and taps don't fall through.
 	var bg := ColorRect.new()
-	bg.color = Color(0.06, 0.07, 0.11, 0.92)
+	bg.color = Color(0.06, 0.07, 0.11, 0.95)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_STOP
 	shop_root.add_child(bg)
 	ui.add_child(shop_root)
 
 	var v := _make_vbox(shop_root)
-	v.add_child(_make_label("SHOP", 72))
-	shop_coin_label = _make_label("Coins: 0", 40)
+	v.add_child(_make_label("SHOP", 60))
+	shop_coin_label = _make_label("Coins: 0", 38)
 	shop_coin_label.add_theme_color_override("font_color", Color(1.0, 0.86, 0.3))
 	v.add_child(shop_coin_label)
-	# Free-coins rewarded-ad button, separate from the skin list.
-	ad_coins_btn = _make_button("WATCH AD   +%d  COINS" % AD_COINS_REWARD, 30, true)
+	# Free-coins rewarded-ad button (the coin faucet), always visible.
+	ad_coins_btn = _make_button("WATCH AD   +%d  COINS" % AD_COINS_REWARD, 26, true)
+	ad_coins_btn.custom_minimum_size = Vector2(420, 78)
 	ad_coins_btn.pressed.connect(_on_watch_ad_coins)
 	v.add_child(ad_coins_btn)
-	var sp := Control.new()
-	sp.custom_minimum_size = Vector2(0, 20)
-	v.add_child(sp)
-	for s in Skins.CATALOG:
-		var row := HBoxContainer.new()
-		row.alignment = BoxContainer.ALIGNMENT_CENTER
-		row.add_theme_constant_override("separation", 16)
-		row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		var pic := TextureRect.new()
-		pic.texture = Skins.preview_texture(s["id"], 96)
-		pic.custom_minimum_size = Vector2(80, 80)
-		pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(pic)
-		var b := _make_button(s["name"], 34)
-		b.custom_minimum_size = Vector2(380, 84)
-		b.pressed.connect(_on_skin_pressed.bind(s["id"]))
-		_skin_buttons[s["id"]] = b
-		row.add_child(b)
-		# Invisible right spacer (= preview width) keeps the BUTTON centered on
-		# screen, aligned with the WATCH AD / Back buttons; preview sits in the
-		# left gutter.
-		var rsp := Control.new()
-		rsp.custom_minimum_size = Vector2(80, 0)
-		rsp.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		row.add_child(rsp)
-		v.add_child(row)
-	var sp2 := Control.new()
-	sp2.custom_minimum_size = Vector2(0, 30)
-	v.add_child(sp2)
-	var back := _make_button("Back", 34)
+
+	# Tab row: SKINS / ITEMS.
+	var tabs := HBoxContainer.new()
+	tabs.alignment = BoxContainer.ALIGNMENT_CENTER
+	tabs.add_theme_constant_override("separation", 12)
+	v.add_child(tabs)
+	shop_tab_skins_btn = _make_button("SKINS", 28)
+	shop_tab_skins_btn.custom_minimum_size = Vector2(210, 74)
+	shop_tab_skins_btn.pressed.connect(_show_shop_tab.bind("skins"))
+	tabs.add_child(shop_tab_skins_btn)
+	shop_tab_items_btn = _make_button("ITEMS", 28)
+	shop_tab_items_btn.custom_minimum_size = Vector2(210, 74)
+	shop_tab_items_btn.pressed.connect(_show_shop_tab.bind("items"))
+	tabs.add_child(shop_tab_items_btn)
+
+	# Scrollable content area holding both views (only one visible at a time).
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(660, 620)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	v.add_child(scroll)
+	var content := VBoxContainer.new()
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.add_theme_constant_override("separation", 12)
+	scroll.add_child(content)
+
+	skins_view = VBoxContainer.new()
+	skins_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	skins_view.add_theme_constant_override("separation", 12)
+	content.add_child(skins_view)
+
+	items_view = VBoxContainer.new()
+	items_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	items_view.add_theme_constant_override("separation", 18)
+	content.add_child(items_view)
+	_build_items_view()
+
+	var back := _make_button("Back", 32)
 	back.pressed.connect(_close_shop)
 	v.add_child(back)
+
+# The consumables tab: buy shields, roll a random "Surprise Orb" skin.
+func _build_items_view() -> void:
+	# --- Shield ---
+	var srow := HBoxContainer.new()
+	srow.alignment = BoxContainer.ALIGNMENT_CENTER
+	srow.add_theme_constant_override("separation", 18)
+	var sicon := TextureRect.new()
+	sicon.texture = _make_shield_icon(96)
+	sicon.custom_minimum_size = Vector2(96, 96)
+	sicon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	sicon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	srow.add_child(sicon)
+	var scol := VBoxContainer.new()
+	scol.add_theme_constant_override("separation", 6)
+	shield_owned_label = _make_label("Shields  0 / %d" % Profile.MAX_SHIELDS, 30)
+	scol.add_child(shield_owned_label)
+	shield_buy_btn = _make_button("BUY   %d coins" % Profile.SHIELD_PRICE, 26)
+	shield_buy_btn.custom_minimum_size = Vector2(320, 74)
+	shield_buy_btn.pressed.connect(_on_buy_shield)
+	scol.add_child(shield_buy_btn)
+	srow.add_child(scol)
+	items_view.add_child(srow)
+
+	# --- Surprise Orb (random procedural skin) ---
+	var rrow := HBoxContainer.new()
+	rrow.alignment = BoxContainer.ALIGNMENT_CENTER
+	rrow.add_theme_constant_override("separation", 18)
+	var ricon := TextureRect.new()
+	ricon.texture = Skins.preview_texture("neon", 96)
+	ricon.custom_minimum_size = Vector2(96, 96)
+	ricon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ricon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rrow.add_child(ricon)
+	var rcol := VBoxContainer.new()
+	rcol.add_theme_constant_override("separation", 6)
+	rcol.add_child(_make_label("Surprise Orb", 30))
+	roll_btn = _make_button("ROLL   %d coins" % Profile.RANDOM_SKIN_PRICE, 26)
+	roll_btn.custom_minimum_size = Vector2(320, 74)
+	roll_btn.pressed.connect(_on_roll_skin)
+	rcol.add_child(roll_btn)
+	rrow.add_child(rcol)
+	items_view.add_child(rrow)
+
+# One skin row (preview + buy/equip button). Used for catalog & random skins.
+func _make_skin_row(id: String, nm: String) -> Control:
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 16)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var pic := TextureRect.new()
+	pic.texture = Skins.preview_texture(id, 96)
+	pic.custom_minimum_size = Vector2(72, 72)
+	pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(pic)
+	var b := _make_button(nm, 30)
+	b.custom_minimum_size = Vector2(360, 76)
+	b.pressed.connect(_on_skin_pressed.bind(id))
+	_skin_buttons[id] = b
+	row.add_child(b)
+	var rsp := Control.new()
+	rsp.custom_minimum_size = Vector2(72, 0)
+	rsp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(rsp)
+	return row
+
+# Rebuild the skins list = catalog skins + any owned random "Surprise Orb" skins.
+func _rebuild_skins_view() -> void:
+	for c in skins_view.get_children():
+		skins_view.remove_child(c)
+		c.queue_free()
+	_skin_buttons = {}
+	for s in Skins.CATALOG:
+		skins_view.add_child(_make_skin_row(s["id"], s["name"]))
+	for id in Profile.owned.keys():
+		if Skins.is_random(id):
+			skins_view.add_child(_make_skin_row(id, "Surprise Orb"))
+
+func _show_shop_tab(which: String) -> void:
+	var skins := which == "skins"
+	skins_view.visible = skins
+	items_view.visible = not skins
+	_apply_button_style(shop_tab_skins_btn, skins)
+	_apply_button_style(shop_tab_items_btn, not skins)
 
 func _make_label(txt: String, size: int) -> Label:
 	var l := Label.new()
@@ -430,6 +571,63 @@ func _make_coin_icon(size: int) -> ImageTexture:
 			img.set_pixel(x, y, c)
 	return ImageTexture.create_from_image(img)
 
+# Procedural red heart icon for the lives counter (implicit heart curve).
+func _make_heart_icon(size: int) -> ImageTexture:
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var fill := Color(0.96, 0.30, 0.38)
+	var shine := Color(1.0, 0.62, 0.66)
+	for py in size:
+		for px in size:
+			var x := (px + 0.5) / float(size) * 2.8 - 1.4
+			var y := 1.15 - (py + 0.5) / float(size) * 2.7
+			var v := pow(x * x + y * y - 1.0, 3.0) - x * x * pow(y, 3.0)
+			if v <= 0.0:
+				# Soft top-left highlight for a little depth.
+				var hl := Vector2(x, y).distance_to(Vector2(-0.35, 0.45))
+				img.set_pixel(px, py, fill.lerp(shine, clampf(1.0 - hl / 0.7, 0.0, 1.0) * 0.6))
+			else:
+				img.set_pixel(px, py, Color(0, 0, 0, 0))
+	return ImageTexture.create_from_image(img)
+
+# Procedural kite/heater shield icon: flat rounded top, sides tapering to a point.
+func _make_shield_icon(size: int) -> ImageTexture:
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var steel := Color(0.58, 0.66, 0.85)
+	var steel_dk := Color(0.34, 0.40, 0.58)
+	var edge := Color(0.18, 0.22, 0.34)
+	var ridge := Color(0.82, 0.88, 0.98)
+	var cx := size * 0.5
+	var top := size * 0.07
+	var bot := size * 0.96
+	var half := size * 0.40  # half width at the top
+	for py in size:
+		for px in size:
+			var ty := (py - top) / (bot - top)  # 0 = top, 1 = bottom point
+			if ty < 0.0 or ty > 1.0:
+				img.set_pixel(px, py, Color(0, 0, 0, 0))
+				continue
+			# Width: full across the top third, then curve smoothly to a point.
+			var hw := half
+			if ty > 0.34:
+				hw = half * cos((ty - 0.34) / 0.66 * (PI * 0.5))
+			# Round the two top corners a touch.
+			if ty < 0.12:
+				hw = minf(hw, half - (0.12 - ty) / 0.12 * (size * 0.10))
+			var dx := absf(px - cx)
+			if dx <= hw and hw > 0.0:
+				var c: Color
+				var t := dx / maxf(hw, 0.001)
+				if dx > hw - size * 0.055 or ty > 0.965 or ty < 0.03:
+					c = edge  # border
+				elif dx < size * 0.045:
+					c = ridge.lerp(steel, 0.35)  # center ridge highlight
+				else:
+					c = steel.lerp(steel_dk, t * 0.55)
+				img.set_pixel(px, py, c)
+			else:
+				img.set_pixel(px, py, Color(0, 0, 0, 0))
+	return ImageTexture.create_from_image(img)
+
 func _update_hud_ball() -> void:
 	if hud_ball:
 		hud_ball.texture = Skins.preview_texture(Profile.equipped, 96)
@@ -456,25 +654,44 @@ func _set_state(s: int) -> void:
 	menu_root.visible = (s == State.MENU)
 	gameover_root.visible = (s == State.GAMEOVER)
 	shop_root.visible = (s == State.SHOP)
-	postad_root.visible = (s == State.POSTAD)
+	outoflives_root.visible = (s == State.OUTOFLIVES)
 	score_label.visible = (s == State.PLAYING)
 	# Coin counter + equipped-ball preview show everywhere except overlays
-	# (shop / post-ad card, which have their own backdrops).
-	var overlay := s == State.SHOP or s == State.POSTAD
+	# (shop / out-of-lives gate, which have their own backdrops).
+	var overlay := s == State.SHOP or s == State.OUTOFLIVES
 	coin_hud.visible = not overlay
 	hud_ball.visible = not overlay
 	coin_label.text = str(Profile.coins)
+	_refresh_lives()
+	_refresh_shield_hud()
 
-# Entry point for RETRY / tap-to-start. Counts the play and, on the interstitial
-# cadence, shows the ad + post-ad card before the run actually begins.
+# Lives counter text + visibility (hidden during play/overlays and when the
+# Unlimited Lives entitlement is owned -- there's no limit to show then).
+func _refresh_lives() -> void:
+	var unlimited := Ads.has_unlimited_lives()
+	lives_hud.visible = (not unlimited) and (state == State.MENU or state == State.GAMEOVER)
+	if not unlimited:
+		lives_count_label.text = "%d / %d" % [Profile.lives, Profile.MAX_LIVES]
+
+# Shield counter: shown only during a run, and only when you're carrying shields.
+func _refresh_shield_hud() -> void:
+	shield_hud.visible = (state == State.PLAYING) and (Profile.shields > 0)
+	shield_count_label.text = "x%d" % Profile.shields
+
+# Entry point for RETRY / tap-to-start. Gated by lives: if the player is out
+# (and hasn't bought Unlimited Lives), show the out-of-lives gate instead of starting.
 func _start_game() -> void:
-	var was_gameover := state == State.GAMEOVER
-	Ads.notify_play()
-	# Only surface the post-ad card if an interstitial actually played.
-	if was_gameover and Ads.is_interstitial_due() and Ads.show_interstitial():
-		_set_state(State.POSTAD)
-	else:
-		_begin_run()
+	Profile.refill_if_new_day()
+	if not Ads.has_unlimited_lives() and not Profile.has_lives():
+		_show_outoflives()
+		return
+	_begin_run()
+
+func _show_outoflives() -> void:
+	oot_watch_btn.visible = Ads.is_rewarded_ready()
+	var s := Profile.seconds_until_refill()
+	oot_timer_label.text = "Free lives in %dh %dm" % [s / 3600, (s % 3600) / 60]
+	_set_state(State.OUTOFLIVES)
 
 func _begin_run() -> void:
 	_clear_field()
@@ -484,7 +701,6 @@ func _begin_run() -> void:
 	coin_label.text = str(Profile.coins)
 	player.reset()
 	shake = 0.0
-	_revived_this_run = false
 	_reward_action = ""
 	_set_state(State.PLAYING)
 
@@ -510,8 +726,10 @@ func _game_over() -> void:
 	final_label.text = "Score: %d" % score
 	best_label.text = "Best: %d" % best
 	coins_gained_label.text = "+%d coins" % _run_coins if _run_coins > 0 else ""
+	# Each death costs a life (unless the player owns Unlimited Lives).
+	if not Ads.has_unlimited_lives():
+		Profile.lose_life()
 	Profile.save()
-	_update_gameover_buttons()
 	_set_state(State.GAMEOVER)
 
 # Halt all world motion on death so the scene freezes behind the game-over UI.
@@ -523,11 +741,8 @@ func _freeze_field() -> void:
 		if is_instance_valid(c):
 			c.set_physics_process(false)
 
-func _update_gameover_buttons() -> void:
-	revive_btn.visible = (not _revived_this_run) and Ads.is_rewarded_ready()
-	remove_ads_btn.visible = not Ads.ads_removed
-
 func _go_to_menu() -> void:
+	Profile.refill_if_new_day()
 	_clear_field()
 	score = 0
 	player.reset()
@@ -536,25 +751,23 @@ func _go_to_menu() -> void:
 
 # ------------------------------------------------------------------ Ads / IAP
 
-func _on_revive_pressed() -> void:
-	if _revived_this_run or not Ads.is_rewarded_ready():
+# Out-of-lives gate: watch a rewarded ad for +LIVES_PER_AD lives, then play on.
+func _on_watch_ad_lives() -> void:
+	if not Ads.is_rewarded_ready():
 		return
-	_reward_action = "revive"
+	_reward_action = "lives"
 	Ads.show_rewarded()
 
+# Shop: watch a rewarded ad for free coins.
 func _on_watch_ad_coins() -> void:
 	if not Ads.is_rewarded_ready():
 		return
 	_reward_action = "coins"
 	Ads.show_rewarded()
 
-func _on_remove_ads_pressed() -> void:
+# Out-of-lives gate: buy the one-time Unlimited Lives entitlement.
+func _on_buy_unlimited() -> void:
 	Ads.purchase_remove_ads()
-
-# Remove Ads tapped on the post-ad card -- buy, then carry on into the run.
-func _on_remove_ads_from_card() -> void:
-	Ads.purchase_remove_ads()
-	_begin_run()
 
 func _on_rewarded_completed(granted: bool) -> void:
 	var action := _reward_action
@@ -562,8 +775,9 @@ func _on_rewarded_completed(granted: bool) -> void:
 	if not granted:
 		return
 	match action:
-		"revive":
-			_do_revive()
+		"lives":
+			Profile.add_lives(Profile.LIVES_PER_AD)
+			_begin_run()  # they watched an ad specifically to keep playing
 		"coins":
 			Profile.add_coins(AD_COINS_REWARD)
 			Profile.save()
@@ -571,22 +785,16 @@ func _on_rewarded_completed(granted: bool) -> void:
 			_refresh_shop()
 
 func _on_ads_removed_changed(_removed: bool) -> void:
-	if remove_ads_btn:
-		remove_ads_btn.visible = false
-	if ad_coins_btn:
-		ad_coins_btn.visible = true  # rewarded coins still available after removing ads
-
-func _do_revive() -> void:
-	# Clear the field so the player isn't instantly re-killed; keep score & coins.
-	_clear_field()
-	_revived_this_run = true
-	player.reset()
-	shake = 0.0
-	_set_state(State.PLAYING)
+	# Unlimited Lives purchased: drop the gate. If we're sitting on it, play on.
+	_refresh_lives()
+	if state == State.OUTOFLIVES:
+		_begin_run()
 
 # --------------------------------------------------------------------- Shop
 
 func _open_shop() -> void:
+	_rebuild_skins_view()
+	_show_shop_tab("skins")
 	_refresh_shop()
 	_set_state(State.SHOP)
 
@@ -603,23 +811,47 @@ func _on_skin_pressed(id: String) -> void:
 	_update_hud_ball()
 	_refresh_shop()
 
+func _on_buy_shield() -> void:
+	if Profile.buy_shield():
+		_refresh_shop()
+
+func _on_roll_skin() -> void:
+	var id := Profile.roll_random_skin()
+	if id == "":
+		return
+	player.apply_skin(Profile.equipped)
+	_update_hud_ball()
+	_rebuild_skins_view()
+	_show_shop_tab("skins")  # show off the freshly-rolled (and equipped) orb
+	_refresh_shop()
+
 func _refresh_shop() -> void:
 	shop_coin_label.text = "Coins: %d" % Profile.coins
 	coin_label.text = str(Profile.coins)
-	for s in Skins.CATALOG:
-		var b: Button = _skin_buttons[s["id"]]
-		var id: String = s["id"]
-		var equipped := Profile.equipped == id
+	# Consumables tab
+	if shield_owned_label:
+		shield_owned_label.text = "Shields  %d / %d" % [Profile.shields, Profile.MAX_SHIELDS]
+	if shield_buy_btn:
+		shield_buy_btn.disabled = Profile.shields >= Profile.MAX_SHIELDS \
+			or not Profile.can_afford(Profile.SHIELD_PRICE)
+	if roll_btn:
+		roll_btn.disabled = not Profile.can_afford(Profile.RANDOM_SKIN_PRICE)
+	# Skins tab (catalog + owned random skins; _skin_buttons is rebuilt per open)
+	for id in _skin_buttons.keys():
+		var b: Button = _skin_buttons[id]
+		var s: Dictionary = Skins.get_skin(id)
+		var nm := str(s["name"])
+		var price := int(s["price"])
+		var equipped: bool = Profile.equipped == id
 		if equipped:
-			b.text = "%s  -  Equipped" % s["name"]
+			b.text = "%s  -  Equipped" % nm
 			b.disabled = false
 		elif Profile.is_owned(id):
-			b.text = "%s  -  Tap to equip" % s["name"]
+			b.text = "%s  -  Tap to equip" % nm
 			b.disabled = false
 		else:
-			b.text = "%s  -  %d" % [s["name"], s["price"]]
-			b.disabled = not Profile.can_afford(int(s["price"]))
-		# Highlight the equipped skin with the accent style.
+			b.text = "%s  -  %d" % [nm, price]
+			b.disabled = not Profile.can_afford(price)
 		_apply_button_style(b, equipped)
 
 # -------------------------------------------------------------------- Gameplay
@@ -698,7 +930,14 @@ func _on_wall_crossed(survived: bool) -> void:
 			if milestone_sfx and milestone_sfx.stream:
 				milestone_sfx.play()
 	else:
-		_game_over()
+		# A carried shield absorbs the hit instead of ending the run.
+		if Profile.use_shield():
+			shake = maxf(shake, 0.5)
+			if milestone_sfx and milestone_sfx.stream:
+				milestone_sfx.play()
+			_refresh_shield_hud()
+		else:
+			_game_over()
 
 func _current_speed() -> float:
 	return minf(8.0 + score * 0.55, 28.0)
@@ -752,8 +991,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			pass  # explicit RETRY / MENU / REVIVE buttons handle input
 		State.SHOP:
 			pass  # shop buttons handle their own input
-		State.POSTAD:
-			pass  # TRY AGAIN / REMOVE ADS buttons handle their own input
+		State.OUTOFLIVES:
+			pass  # gate buttons (watch ad / unlimited / menu) handle their own input
 		State.PLAYING:
 			if event is InputEventScreenDrag:
 				player.move_by(event.relative.x * DRAG_SENS, event.relative.y * DRAG_SENS)

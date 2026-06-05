@@ -12,7 +12,20 @@ const CATALOG := [
 	{ "id": "gold", "name": "Gold", "price": 600 },
 ]
 
+## Random ("Surprise Orb") skins are generated on the fly from a seed baked into
+## the id ("rnd_<seed>"), so there's an endless supply -- a perfect coin sink.
+static func is_random(id: String) -> bool:
+	return id.begins_with("rnd_")
+
+static func _seed_of(id: String) -> int:
+	return int(id.substr(4))
+
+static func new_random_id() -> String:
+	return "rnd_" + str(randi())
+
 static func get_skin(id: String) -> Dictionary:
+	if is_random(id):
+		return { "id": id, "name": "Surprise Orb", "price": 0 }
 	for s in CATALOG:
 		if s["id"] == id:
 			return s
@@ -24,6 +37,20 @@ static func make_material(id: String) -> StandardMaterial3D:
 	m.metallic = 0.05
 	var tex := _albedo_texture(id)
 	m.albedo_texture = tex
+	if is_random(id):
+		# Give random skins a varied finish (matte / metallic / glow) from the seed.
+		var rng := RandomNumberGenerator.new()
+		rng.seed = _seed_of(id) ^ 0x9E3779B9
+		match rng.randi_range(0, 2):
+			1:
+				m.metallic = 1.0
+				m.roughness = rng.randf_range(0.18, 0.4)
+			2:
+				m.emission_enabled = true
+				m.emission_texture = tex
+				m.emission = Color.from_hsv(rng.randf(), 0.7, 1.0)
+				m.emission_energy_multiplier = 1.3
+		return m
 	match id:
 		"eye":
 			m.roughness = 0.18
@@ -77,8 +104,29 @@ static func _sphere_dir(u: float, v: float) -> Vector3:
 	var st := sin(theta)
 	return Vector3(sin(phi) * st, cos(theta), cos(phi) * st)
 
+# A deterministic random pattern for a "Surprise Orb" skin (seeded by its id).
+static func _random_pattern_image(seed_val: int) -> Image:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val
+	var h := rng.randf()
+	var c1 := Color.from_hsv(h, rng.randf_range(0.55, 0.95), rng.randf_range(0.7, 1.0))
+	var c2 := Color.from_hsv(fmod(h + rng.randf_range(0.15, 0.6), 1.0),
+		rng.randf_range(0.5, 0.95), rng.randf_range(0.45, 0.9))
+	match rng.randi_range(0, 3):
+		0:
+			return _checker(128, 64, rng.randi_range(4, 10), rng.randi_range(3, 6), c1, c2).get_image()
+		1:
+			return _stripes(192, 96, [c1, c2]).get_image()
+		2:
+			var c3 := Color.from_hsv(rng.randf(), 0.85, 0.95)
+			return _stripes(192, 96, [c1, c2, c3]).get_image()
+		_:
+			return _checker(64, 32, 8, 4, c1, c2).get_image()
+
 # The flat pattern that wraps onto the ball for a given skin.
 static func _pattern_image(id: String) -> Image:
+	if is_random(id):
+		return _random_pattern_image(_seed_of(id))
 	match id:
 		"beach":
 			return _stripes(192, 96, [

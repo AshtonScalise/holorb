@@ -54,6 +54,9 @@ const INTERSTITIAL_EVERY_N_PLAYS := 3
 const SAVE_PATH := "user://ads.save"
 
 var ads_removed := false
+## True once the player has actually been shown an ad this session. Used to gate
+## the "Remove Ads" upsell so it never appears before the user has seen any ads.
+var has_shown_ad := false
 var _play_count := 0
 
 # --- backend state (mobile only; stay null/false on desktop) ---
@@ -108,7 +111,8 @@ func _init_admob() -> void:
 	MobileAds.initialize()
 	_admob_ready = true
 	_setup_admob_callbacks()
-	_load_interstitial()
+	# No forced interstitials in this game -- ads are opt-in only (rewarded), so we
+	# only preload rewarded ads. Interstitial code is kept but intentionally unused.
 	_load_rewarded()
 
 func _setup_admob_callbacks() -> void:
@@ -202,6 +206,11 @@ func restore_purchases() -> void:
 		_ios_iap.restore_purchases()
 		return
 	print("[Ads] restore_purchases (stub)")
+
+## The one-time "remove_ads" product now grants the UNLIMITED LIVES entitlement
+## (the lives gate is disabled). The product ID / billing flow is unchanged.
+func has_unlimited_lives() -> bool:
+	return ads_removed
 
 func _grant_remove_ads() -> void:
 	if ads_removed:
@@ -313,6 +322,7 @@ func show_interstitial() -> bool:
 	if _has_admob():
 		if _interstitial_ad != null:
 			_interstitial_ad.show()
+			has_shown_ad = true
 			return true
 		_load_interstitial()  # wasn't ready; load for next time
 		return false
@@ -320,6 +330,7 @@ func show_interstitial() -> bool:
 	# don't fake it -- report "no ad shown" so the post-ad card is skipped.
 	if not _is_mobile():
 		print("[Ads] interstitial shown (stub)")
+		has_shown_ad = true
 		return true
 	return false
 
@@ -335,6 +346,7 @@ func show_rewarded() -> void:
 		if _rewarded_ad != null:
 			_reward_earned = false
 			_rewarded_ad.show(_reward_listener)  # reward arrives via the listener
+			has_shown_ad = true
 		else:
 			_load_rewarded()
 			rewarded_completed.emit(false)  # nothing to show -> no reward
@@ -343,6 +355,7 @@ func show_rewarded() -> void:
 	# device with no AdMob, emit "no reward" instead of handing out a free one.
 	if not _is_mobile():
 		print("[Ads] rewarded shown (stub) -> reward granted")
+		has_shown_ad = true
 		rewarded_completed.emit(true)
 	else:
 		rewarded_completed.emit(false)

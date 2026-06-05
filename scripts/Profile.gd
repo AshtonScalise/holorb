@@ -4,12 +4,93 @@ extends Node
 
 const PATH := "user://profile.cfg"
 
+## Lives gate: players get MAX_LIVES per day (refilled at local midnight), lose one
+## on each death, and can watch a rewarded ad for +LIVES_PER_AD when they run out.
+const MAX_LIVES := 5
+const LIVES_PER_AD := 3
+
+## Consumables -- coin sinks so coins are always worth earning.
+const MAX_SHIELDS := 5      # carry up to this many single-use shields into a run
+const SHIELD_PRICE := 75    # coins per shield
+const RANDOM_SKIN_PRICE := 150  # coins for a "Surprise Orb" random skin
+
 var coins := 0
 var owned := { "checker": true }
 var equipped := "checker"
+var lives := MAX_LIVES
+var last_refill := ""  # "YYYY-MM-DD" (local) of the last daily refill
+var shields := 0       # stackable single-use shields (each absorbs one hit)
 
 func _ready() -> void:
 	_load()
+	refill_if_new_day()
+
+# ---------------------------------------------------------------------- Lives
+
+func _today_str() -> String:
+	var d := Time.get_date_dict_from_system()
+	return "%04d-%02d-%02d" % [d["year"], d["month"], d["day"]]
+
+## Refill lives to full once per local calendar day.
+func refill_if_new_day() -> void:
+	var today := _today_str()
+	if last_refill != today:
+		last_refill = today
+		lives = MAX_LIVES
+		save()
+
+func has_lives() -> bool:
+	return lives > 0
+
+func lose_life() -> void:
+	if lives > 0:
+		lives -= 1
+		save()
+
+func add_lives(n: int) -> void:
+	lives = clampi(lives + n, 0, MAX_LIVES)
+	save()
+
+## Seconds until the next local midnight (when lives refill).
+func seconds_until_refill() -> int:
+	var t := Time.get_time_dict_from_system()
+	return 86400 - (int(t["hour"]) * 3600 + int(t["minute"]) * 60 + int(t["second"]))
+
+# --------------------------------------------------------------- Consumables
+
+func add_shields(n: int) -> void:
+	shields = clampi(shields + n, 0, MAX_SHIELDS)
+	save()
+
+## Consume one shield. Returns true if there was one to spend.
+func use_shield() -> bool:
+	if shields > 0:
+		shields -= 1
+		save()
+		return true
+	return false
+
+## Buy one shield with coins. Returns true on success.
+func buy_shield() -> bool:
+	if shields >= MAX_SHIELDS or coins < SHIELD_PRICE:
+		return false
+	coins -= SHIELD_PRICE
+	shields += 1
+	save()
+	return true
+
+## Buy a fresh random "Surprise Orb" skin and equip it. Returns the new id, or "".
+func roll_random_skin() -> String:
+	if coins < RANDOM_SKIN_PRICE:
+		return ""
+	coins -= RANDOM_SKIN_PRICE
+	var id := Skins.new_random_id()
+	while owned.has(id):
+		id = Skins.new_random_id()
+	owned[id] = true
+	equipped = id
+	save()
+	return id
 
 func add_coins(n: int) -> void:
 	coins += n
@@ -43,6 +124,9 @@ func save() -> void:
 	cf.set_value("profile", "coins", coins)
 	cf.set_value("profile", "owned", owned.keys())
 	cf.set_value("profile", "equipped", equipped)
+	cf.set_value("profile", "lives", lives)
+	cf.set_value("profile", "last_refill", last_refill)
+	cf.set_value("profile", "shields", shields)
 	cf.save(PATH)
 
 func _load() -> void:
@@ -53,6 +137,9 @@ func _load() -> void:
 		for id in cf.get_value("profile", "owned", ["checker"]):
 			owned[id] = true
 		equipped = str(cf.get_value("profile", "equipped", "checker"))
+		lives = int(cf.get_value("profile", "lives", MAX_LIVES))
+		last_refill = str(cf.get_value("profile", "last_refill", ""))
+		shields = int(cf.get_value("profile", "shields", 0))
 	# Always own the default skin.
 	if not owned.has("checker"):
 		owned["checker"] = true
