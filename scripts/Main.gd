@@ -22,6 +22,7 @@ var walls: Array = []
 var coins: Array = []
 var _newest_wall: Wall = null
 var _run_coins := 0
+var _magnet_active := false  # Coin Magnet consumed for this run
 
 # World
 var cam: Camera3D
@@ -38,25 +39,26 @@ var best_label: Label
 var menu_btn: Button
 var coin_label: Label
 var coin_hud: HBoxContainer
-var hud_ball: TextureRect
 var coins_gained_label: Label
 var shop_root: Control
 var shop_coin_label: Label
-var _skin_buttons := {}
-# Shop tabs (skins vs consumables) + item widgets
-var shop_tab_skins_btn: Button
-var shop_tab_items_btn: Button
-var skins_view: VBoxContainer
-var items_view: VBoxContainer
-var shield_owned_label: Label
-var shield_buy_btn: Button
-var roll_btn: Button
+var skins_tab_btn: Button
+var effects_tab_btn: Button
+var items_tab_btn: Button
+var _content_list: VBoxContainer   # the scrollable list, rebuilt per tab
+var _shop_tab := "skins"
 
-# Lives + shields HUD
+# Lives + shields HUD, Zelda-style pip rows, top-left (never shown at the same
+# time -- lives on menu/game-over, shields during a run).
 var lives_hud: HBoxContainer
-var lives_count_label: Label
 var shield_hud: HBoxContainer
-var shield_count_label: Label
+var _life_pips: Array = []     # 5 heart TextureRects
+var _shield_pips: Array = []   # 5 shield TextureRects
+var _heart_full: ImageTexture
+var _heart_empty: ImageTexture
+var _heart_gold: ImageTexture
+var _shield_full: ImageTexture
+var _shield_empty: ImageTexture
 
 # Ads / IAP -- the out-of-lives gate (watch ad for lives, or buy Unlimited Lives)
 var _reward_action := ""  # "lives" or "coins" -- what the next rewarded ad is for
@@ -79,7 +81,6 @@ func _ready() -> void:
 	_build_audio()
 	_build_world()
 	_build_ui()
-	_update_hud_ball()
 	best = _load_best()
 	Profile.refill_if_new_day()
 	Ads.rewarded_completed.connect(_on_rewarded_completed)
@@ -195,16 +196,6 @@ func _build_ui() -> void:
 	score_label.offset_bottom = 180
 	ui.add_child(score_label)
 
-	# Equipped-ball preview, top-left -- reflects the current skin live.
-	hud_ball = TextureRect.new()
-	hud_ball.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	hud_ball.position = Vector2(26, 34)
-	hud_ball.custom_minimum_size = Vector2(92, 92)
-	hud_ball.size = Vector2(92, 92)
-	hud_ball.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	hud_ball.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	ui.add_child(hud_ball)
-
 	# Live coin counter with a coin icon, top-right.
 	coin_hud = HBoxContainer.new()
 	coin_hud.set_anchors_preset(Control.PRESET_TOP_RIGHT)
@@ -231,16 +222,12 @@ func _build_ui() -> void:
 	var mv := _make_vbox(menu_root)
 	mv.add_child(_make_label("HOLORB", 96))
 	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 60)
+	spacer.custom_minimum_size = Vector2(0, 70)
 	mv.add_child(spacer)
-	var hint := _make_label("Tap to Start", 48)
-	mv.add_child(hint)
-	var ctrl_hint := _make_label("drag to move  -  survive the walls", 30)
-	mv.add_child(ctrl_hint)
-	var msp := Control.new()
-	msp.custom_minimum_size = Vector2(0, 40)
-	mv.add_child(msp)
-	var shop_btn := _make_button("SHOP", 36, true)
+	var play_btn := _make_button("PLAY", 46, true)
+	play_btn.pressed.connect(_start_game)
+	mv.add_child(play_btn)
+	var shop_btn := _make_button("SHOP", 36)
 	shop_btn.pressed.connect(_open_shop)
 	mv.add_child(shop_btn)
 
@@ -265,41 +252,44 @@ func _build_ui() -> void:
 	menu_btn.pressed.connect(_go_to_menu)
 	gv.add_child(menu_btn)
 
-	# Persistent lives counter (heart + "n / max"), shown on menu & game-over.
+	# Pre-render the pip icons once.
+	_heart_full = _make_heart_icon(48, Color(0.95, 0.27, 0.34), Color(1.0, 0.6, 0.64))
+	_heart_empty = _make_heart_icon(48, Color(0.24, 0.26, 0.32), Color(0.32, 0.34, 0.40))
+	_heart_gold = _make_heart_icon(48, Color(1.0, 0.82, 0.30), Color(1.0, 0.93, 0.6))
+	_shield_full = _make_shield_icon(48, true)
+	_shield_empty = _make_shield_icon(48, false)
+
+	# Lives: a Zelda-style row of 5 hearts, top-left (menu & game-over).
 	lives_hud = HBoxContainer.new()
-	lives_hud.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	lives_hud.offset_top = 40
-	lives_hud.offset_bottom = 108
-	lives_hud.alignment = BoxContainer.ALIGNMENT_CENTER
-	lives_hud.add_theme_constant_override("separation", 10)
+	lives_hud.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	lives_hud.position = Vector2(28, 40)
+	lives_hud.add_theme_constant_override("separation", 4)
 	lives_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(lives_hud)
-	var heart := TextureRect.new()
-	heart.texture = _make_heart_icon(56)
-	heart.custom_minimum_size = Vector2(56, 56)
-	heart.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	heart.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	lives_hud.add_child(heart)
-	lives_count_label = _make_label("5 / 5", 44)
-	lives_count_label.add_theme_color_override("font_color", Color(1.0, 0.5, 0.55))
-	lives_hud.add_child(lives_count_label)
+	for i in Profile.MAX_LIVES:
+		var pip := TextureRect.new()
+		pip.texture = _heart_full
+		pip.custom_minimum_size = Vector2(48, 48)
+		pip.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lives_hud.add_child(pip)
+		_life_pips.append(pip)
 
-	# Shield counter (kite shield + "xN"), top-left during a run when you have any.
+	# Shields: a second row of pips, just below the hearts.
 	shield_hud = HBoxContainer.new()
 	shield_hud.set_anchors_preset(Control.PRESET_TOP_LEFT)
-	shield_hud.position = Vector2(30, 138)
-	shield_hud.add_theme_constant_override("separation", 6)
+	shield_hud.position = Vector2(28, 96)
+	shield_hud.add_theme_constant_override("separation", 4)
 	shield_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(shield_hud)
-	var shield_icon := TextureRect.new()
-	shield_icon.texture = _make_shield_icon(60)
-	shield_icon.custom_minimum_size = Vector2(60, 60)
-	shield_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	shield_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	shield_hud.add_child(shield_icon)
-	shield_count_label = _make_label("x0", 40)
-	shield_count_label.add_theme_color_override("font_color", Color(0.78, 0.85, 1.0))
-	shield_hud.add_child(shield_count_label)
+	for i in Profile.MAX_SHIELDS:
+		var pip := TextureRect.new()
+		pip.texture = _shield_empty
+		pip.custom_minimum_size = Vector2(48, 48)
+		pip.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		pip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		shield_hud.add_child(pip)
+		_shield_pips.append(pip)
 
 	_build_shop()
 	_build_outoflives()
@@ -335,149 +325,349 @@ func _build_outoflives() -> void:
 
 func _build_shop() -> void:
 	shop_root = _make_screen()
-	# Opaque-ish backdrop so the shop is readable and taps don't fall through.
 	var bg := ColorRect.new()
-	bg.color = Color(0.06, 0.07, 0.11, 0.95)
+	bg.color = Color(0.05, 0.06, 0.10, 0.97)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_STOP
 	shop_root.add_child(bg)
 	ui.add_child(shop_root)
 
-	var v := _make_vbox(shop_root)
-	v.add_child(_make_label("SHOP", 60))
-	shop_coin_label = _make_label("Coins: 0", 38)
+	# Outer padding around the whole shop.
+	var outer := MarginContainer.new()
+	outer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	outer.add_theme_constant_override("margin_left", 28)
+	outer.add_theme_constant_override("margin_right", 28)
+	outer.add_theme_constant_override("margin_top", 64)
+	outer.add_theme_constant_override("margin_bottom", 40)
+	shop_root.add_child(outer)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 16)
+	outer.add_child(col)
+
+	# Header: title (left) + coin balance pill (right).
+	var header := HBoxContainer.new()
+	var title := _make_label("Shop", 54)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	header.add_child(title)
+	var hsp := Control.new()
+	hsp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(hsp)
+	var coin_pill := HBoxContainer.new()
+	coin_pill.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	coin_pill.add_theme_constant_override("separation", 8)
+	var ci := TextureRect.new()
+	ci.texture = _make_coin_icon(48)
+	ci.custom_minimum_size = Vector2(48, 48)
+	ci.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	coin_pill.add_child(ci)
+	shop_coin_label = _make_label("0", 42)
 	shop_coin_label.add_theme_color_override("font_color", Color(1.0, 0.86, 0.3))
-	v.add_child(shop_coin_label)
-	# Free-coins rewarded-ad button (the coin faucet), always visible.
-	ad_coins_btn = _make_button("WATCH AD   +%d  COINS" % AD_COINS_REWARD, 26, true)
-	ad_coins_btn.custom_minimum_size = Vector2(420, 78)
-	ad_coins_btn.pressed.connect(_on_watch_ad_coins)
-	v.add_child(ad_coins_btn)
+	coin_pill.add_child(shop_coin_label)
+	header.add_child(coin_pill)
+	col.add_child(header)
 
-	# Tab row: SKINS / ITEMS.
+	# Connected tab strip sitting flush on top of the body panel (no gaps).
+	var tab_group := VBoxContainer.new()
+	tab_group.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	tab_group.add_theme_constant_override("separation", 0)
+	col.add_child(tab_group)
+
 	var tabs := HBoxContainer.new()
-	tabs.alignment = BoxContainer.ALIGNMENT_CENTER
-	tabs.add_theme_constant_override("separation", 12)
-	v.add_child(tabs)
-	shop_tab_skins_btn = _make_button("SKINS", 28)
-	shop_tab_skins_btn.custom_minimum_size = Vector2(210, 74)
-	shop_tab_skins_btn.pressed.connect(_show_shop_tab.bind("skins"))
-	tabs.add_child(shop_tab_skins_btn)
-	shop_tab_items_btn = _make_button("ITEMS", 28)
-	shop_tab_items_btn.custom_minimum_size = Vector2(210, 74)
-	shop_tab_items_btn.pressed.connect(_show_shop_tab.bind("items"))
-	tabs.add_child(shop_tab_items_btn)
+	tabs.add_theme_constant_override("separation", 0)
+	tab_group.add_child(tabs)
+	skins_tab_btn = _make_tab_button("SKINS", "skins")
+	tabs.add_child(skins_tab_btn)
+	effects_tab_btn = _make_tab_button("EFFECTS", "effects")
+	tabs.add_child(effects_tab_btn)
+	items_tab_btn = _make_tab_button("ITEMS", "items")
+	tabs.add_child(items_tab_btn)
 
-	# Scrollable content area holding both views (only one visible at a time).
+	# Body panel (card) wrapping the scrollable list.
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _shop_panel_style())
+	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel.clip_contents = true
+	tab_group.add_child(panel)
 	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(660, 620)
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	scroll.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	v.add_child(scroll)
-	var content := VBoxContainer.new()
-	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	content.add_theme_constant_override("separation", 12)
-	scroll.add_child(content)
+	# Hidden scrollbar (drag/touch scrolling still works) so it never steals width
+	# from the list -- keeps left/right padding symmetric on every tab.
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel.add_child(scroll)
+	# Padding lives INSIDE the scroll: symmetric left/right, plus bottom breathing
+	# room so the last card is fully reachable.
+	var pad := MarginContainer.new()
+	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pad.add_theme_constant_override("margin_left", 16)
+	pad.add_theme_constant_override("margin_top", 14)
+	pad.add_theme_constant_override("margin_right", 16)
+	pad.add_theme_constant_override("margin_bottom", 30)
+	scroll.add_child(pad)
+	_content_list = VBoxContainer.new()
+	_content_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_content_list.add_theme_constant_override("separation", 10)
+	pad.add_child(_content_list)
 
-	skins_view = VBoxContainer.new()
-	skins_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	skins_view.add_theme_constant_override("separation", 12)
-	content.add_child(skins_view)
-
-	items_view = VBoxContainer.new()
-	items_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	items_view.add_theme_constant_override("separation", 18)
-	content.add_child(items_view)
-	_build_items_view()
+	# Persistent "Free Coins" faucet -- always shown above Back, on both tabs.
+	col.add_child(_coins_card())
 
 	var back := _make_button("Back", 32)
+	back.size_flags_horizontal = Control.SIZE_FILL
+	back.custom_minimum_size = Vector2(0, 86)
 	back.pressed.connect(_close_shop)
-	v.add_child(back)
+	col.add_child(back)
 
-# The consumables tab: buy shields, roll a random "Surprise Orb" skin.
-func _build_items_view() -> void:
-	# --- Shield ---
-	var srow := HBoxContainer.new()
-	srow.alignment = BoxContainer.ALIGNMENT_CENTER
-	srow.add_theme_constant_override("separation", 18)
-	var sicon := TextureRect.new()
-	sicon.texture = _make_shield_icon(96)
-	sicon.custom_minimum_size = Vector2(96, 96)
-	sicon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	sicon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	srow.add_child(sicon)
-	var scol := VBoxContainer.new()
-	scol.add_theme_constant_override("separation", 6)
-	shield_owned_label = _make_label("Shields  0 / %d" % Profile.MAX_SHIELDS, 30)
-	scol.add_child(shield_owned_label)
-	shield_buy_btn = _make_button("BUY   %d coins" % Profile.SHIELD_PRICE, 26)
-	shield_buy_btn.custom_minimum_size = Vector2(320, 74)
-	shield_buy_btn.pressed.connect(_on_buy_shield)
-	scol.add_child(shield_buy_btn)
-	srow.add_child(scol)
-	items_view.add_child(srow)
+# A segmented tab button; active state styled via _apply_tab_style.
+func _make_tab_button(text: String, tab_id: String) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", 30)
+	b.focus_mode = Control.FOCUS_NONE
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.custom_minimum_size = Vector2(0, 86)
+	b.pressed.connect(_show_shop_tab.bind(tab_id))
+	return b
 
-	# --- Surprise Orb (random procedural skin) ---
-	var rrow := HBoxContainer.new()
-	rrow.alignment = BoxContainer.ALIGNMENT_CENTER
-	rrow.add_theme_constant_override("separation", 18)
-	var ricon := TextureRect.new()
-	ricon.texture = Skins.preview_texture("neon", 96)
-	ricon.custom_minimum_size = Vector2(96, 96)
-	ricon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	ricon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	rrow.add_child(ricon)
-	var rcol := VBoxContainer.new()
-	rcol.add_theme_constant_override("separation", 6)
-	rcol.add_child(_make_label("Surprise Orb", 30))
-	roll_btn = _make_button("ROLL   %d coins" % Profile.RANDOM_SKIN_PRICE, 26)
-	roll_btn.custom_minimum_size = Vector2(320, 74)
-	roll_btn.pressed.connect(_on_roll_skin)
-	rcol.add_child(roll_btn)
-	rrow.add_child(rcol)
-	items_view.add_child(rrow)
+func _apply_tab_style(b: Button, active: bool) -> void:
+	# Connected "folder tab" look: rounded TOP corners only; the active tab shares
+	# the panel's fill (so it merges into it) and gets an accent top edge.
+	var s := StyleBoxFlat.new()
+	s.corner_radius_top_left = 12
+	s.corner_radius_top_right = 12
+	s.set_content_margin_all(12)
+	s.border_width_left = 1
+	s.border_width_right = 1
+	if active:
+		s.bg_color = Color(0.08, 0.09, 0.15, 0.98)   # == panel fill -> connected
+		s.border_color = Color(0.55, 0.61, 1.0)
+		s.border_width_top = 4                         # accent top edge
+	else:
+		s.bg_color = Color(0.05, 0.06, 0.11, 0.98)
+		s.border_color = Color(0.20, 0.23, 0.34)
+		s.border_width_top = 1
+	b.add_theme_stylebox_override("normal", s)
+	b.add_theme_stylebox_override("hover", s)
+	b.add_theme_stylebox_override("pressed", s)
+	b.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	var fc := Color(1, 1, 1) if active else Color(0.62, 0.67, 0.82)
+	b.add_theme_color_override("font_color", fc)
+	b.add_theme_color_override("font_hover_color", Color(1, 1, 1))
+	b.add_theme_color_override("font_pressed_color", fc)
 
-# One skin row (preview + buy/equip button). Used for catalog & random skins.
-func _make_skin_row(id: String, nm: String) -> Control:
+func _shop_panel_style() -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.bg_color = Color(0.08, 0.09, 0.15, 0.98)
+	s.border_color = Color(0.24, 0.27, 0.40)
+	# Square top (the tab strip connects flush); rounded bottom.
+	s.border_width_left = 1
+	s.border_width_right = 1
+	s.border_width_bottom = 1
+	s.border_width_top = 0
+	s.corner_radius_bottom_left = 16
+	s.corner_radius_bottom_right = 16
+	return s
+
+func _card_style(highlight: bool) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	if highlight:
+		s.bg_color = Color(0.19, 0.22, 0.38, 0.99)
+		s.border_color = Color(0.55, 0.61, 1.0)
+	else:
+		s.bg_color = Color(0.12, 0.13, 0.20, 0.98)
+		s.border_color = Color(0.26, 0.30, 0.44)
+	s.set_border_width_all(1)
+	s.set_corner_radius_all(14)
+	return s
+
+# A flat list-item card: preview icon + title/subtitle + right action button.
+func _list_card(icon: Texture2D, title: String, sub: Control, action: Button, highlight: bool) -> PanelContainer:
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", _card_style(highlight))
+	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var m := MarginContainer.new()
+	m.add_theme_constant_override("margin_left", 14)
+	m.add_theme_constant_override("margin_top", 14)
+	m.add_theme_constant_override("margin_right", 14)
+	m.add_theme_constant_override("margin_bottom", 14)
+	card.add_child(m)
 	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
 	row.add_theme_constant_override("separation", 16)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	m.add_child(row)
 	var pic := TextureRect.new()
-	pic.texture = Skins.preview_texture(id, 96)
-	pic.custom_minimum_size = Vector2(72, 72)
+	pic.texture = icon
+	pic.custom_minimum_size = Vector2(84, 84)
 	pic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	pic.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(pic)
-	var b := _make_button(nm, 30)
-	b.custom_minimum_size = Vector2(360, 76)
-	b.pressed.connect(_on_skin_pressed.bind(id))
-	_skin_buttons[id] = b
-	row.add_child(b)
-	var rsp := Control.new()
-	rsp.custom_minimum_size = Vector2(72, 0)
-	rsp.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(rsp)
-	return row
+	var info := VBoxContainer.new()
+	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	info.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	info.add_theme_constant_override("separation", 4)
+	row.add_child(info)
+	var tl := Label.new()
+	tl.text = title
+	tl.add_theme_font_size_override("font_size", 30)
+	tl.add_theme_color_override("font_color", Color(0.95, 0.97, 1.0))
+	tl.clip_text = true  # so a long name can't force the whole column wider
+	info.add_child(tl)
+	if sub:
+		info.add_child(sub)
+	if action:
+		action.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		row.add_child(action)
+	return card
 
-# Rebuild the skins list = catalog skins + any owned random "Surprise Orb" skins.
-func _rebuild_skins_view() -> void:
-	for c in skins_view.get_children():
-		skins_view.remove_child(c)
-		c.queue_free()
-	_skin_buttons = {}
-	for s in Skins.CATALOG:
-		skins_view.add_child(_make_skin_row(s["id"], s["name"]))
-	for id in Profile.owned.keys():
-		if Skins.is_random(id):
-			skins_view.add_child(_make_skin_row(id, "Surprise Orb"))
+func _sub_label(text: String, color: Color) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", 22)
+	l.add_theme_color_override("font_color", color)
+	l.clip_text = true
+	return l
+
+# Coin icon + price (+ optional muted note), as a card subtitle.
+func _price_sub(price: int, note: String) -> Control:
+	var h := HBoxContainer.new()
+	h.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h.add_theme_constant_override("separation", 6)
+	var ci := TextureRect.new()
+	ci.texture = _make_coin_icon(30)
+	ci.custom_minimum_size = Vector2(30, 30)
+	ci.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	ci.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_child(ci)
+	var pl := Label.new()
+	pl.text = str(price)
+	pl.add_theme_font_size_override("font_size", 24)
+	pl.add_theme_color_override("font_color", Color(1.0, 0.86, 0.3))
+	h.add_child(pl)
+	if note != "":
+		var nl := Label.new()
+		nl.text = "   " + note
+		nl.add_theme_font_size_override("font_size", 20)
+		nl.add_theme_color_override("font_color", Color(0.6, 0.65, 0.78))
+		nl.clip_text = true
+		nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		h.add_child(nl)
+	return h
+
+# A compact card action button.
+func _card_action(text: String, primary: bool, disabled: bool) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.add_theme_font_size_override("font_size", 24)
+	b.focus_mode = Control.FOCUS_NONE
+	b.custom_minimum_size = Vector2(160, 74)
+	_apply_button_style(b, primary)
+	b.disabled = disabled
+	return b
 
 func _show_shop_tab(which: String) -> void:
-	var skins := which == "skins"
-	skins_view.visible = skins
-	items_view.visible = not skins
-	_apply_button_style(shop_tab_skins_btn, skins)
-	_apply_button_style(shop_tab_items_btn, not skins)
+	_shop_tab = which
+	_apply_tab_style(skins_tab_btn, which == "skins")
+	_apply_tab_style(effects_tab_btn, which == "effects")
+	_apply_tab_style(items_tab_btn, which == "items")
+	_rebuild_shop_content()
+
+# Rebuild the list for the active tab (cheap; ~6-10 cards).
+func _rebuild_shop_content() -> void:
+	for c in _content_list.get_children():
+		_content_list.remove_child(c)
+		c.queue_free()
+	if _shop_tab == "skins":
+		_content_list.add_child(_roll_card())  # "Surprise Orb" lives with the skins
+		for s in Skins.CATALOG:
+			_content_list.add_child(_skin_card(s["id"]))
+		for id in Profile.owned.keys():
+			if Skins.is_random(id):
+				_content_list.add_child(_skin_card(id))
+	elif _shop_tab == "effects":
+		for e in Skins.EFFECTS:
+			_content_list.add_child(_effect_card(e["id"]))
+	else:
+		_content_list.add_child(_shield_card())
+		_content_list.add_child(_magnet_card())
+
+func _effect_card(id: String) -> PanelContainer:
+	var e := Skins.get_effect(id)
+	var nm := str(e["name"])
+	var price := int(e["price"])
+	var owned := Profile.is_effect_owned(id)
+	var equipped: bool = Profile.equipped_effect == id
+	var sub: Control
+	var act: Button
+	if equipped:
+		sub = _sub_label("Equipped", Color(0.6, 0.9, 0.66))
+		act = _card_action("EQUIPPED", true, true)
+	elif owned:
+		sub = _sub_label("Owned", Color(0.7, 0.78, 0.92))
+		act = _card_action("EQUIP", false, false)
+		act.pressed.connect(_on_effect_pressed.bind(id))
+	else:
+		sub = _price_sub(price, "")
+		act = _card_action("BUY", true, not Profile.can_afford(price))
+		act.pressed.connect(_on_effect_pressed.bind(id))
+	return _list_card(_make_effect_icon(id), nm, sub, act, equipped)
+
+func _on_effect_pressed(id: String) -> void:
+	if Profile.is_effect_owned(id):
+		Profile.equip_effect(id)
+	elif Profile.buy_effect(id):
+		Profile.equip_effect(id)
+	else:
+		return  # couldn't afford
+	player.apply_effect(Profile.equipped_effect)
+	_refresh_shop()
+
+func _skin_card(id: String) -> PanelContainer:
+	var s := Skins.get_skin(id)
+	var nm := str(s["name"])
+	var price := int(s["price"])
+	var owned := Profile.is_owned(id)
+	var equipped: bool = Profile.equipped == id
+	var sub: Control
+	var act: Button
+	if equipped:
+		sub = _sub_label("Equipped", Color(0.6, 0.9, 0.66))
+		act = _card_action("EQUIPPED", true, true)
+	elif owned:
+		sub = _sub_label("Owned", Color(0.7, 0.78, 0.92))
+		act = _card_action("EQUIP", false, false)
+		act.pressed.connect(_on_skin_pressed.bind(id))
+	else:
+		sub = _price_sub(price, "")
+		act = _card_action("BUY", true, not Profile.can_afford(price))
+		act.pressed.connect(_on_skin_pressed.bind(id))
+	return _list_card(Skins.preview_texture(id, 96), nm, sub, act, equipped)
+
+func _coins_card() -> PanelContainer:
+	var act := _card_action("+%d" % AD_COINS_REWARD, true, false)
+	act.pressed.connect(_on_watch_ad_coins)
+	return _list_card(_make_coin_icon(96), "Free Coins",
+		_sub_label("Watch a short ad", Color(0.66, 0.71, 0.85)), act, false)
+
+func _shield_card() -> PanelContainer:
+	var disabled := Profile.shields >= Profile.MAX_SHIELDS or not Profile.can_afford(Profile.SHIELD_PRICE)
+	var act := _card_action("BUY", true, disabled)
+	act.pressed.connect(_on_buy_shield)
+	return _list_card(_make_shield_icon(96), "Shield",
+		_price_sub(Profile.SHIELD_PRICE, "owned %d/%d" % [Profile.shields, Profile.MAX_SHIELDS]), act, false)
+
+func _magnet_card() -> PanelContainer:
+	var disabled := Profile.magnets >= Profile.MAX_MAGNETS or not Profile.can_afford(Profile.MAGNET_PRICE)
+	var act := _card_action("BUY", true, disabled)
+	act.pressed.connect(_on_buy_magnet)
+	return _list_card(_make_magnet_icon(96), "Coin Magnet",
+		_price_sub(Profile.MAGNET_PRICE, "owned %d/%d  ·  one run, pulls in coins" % [Profile.magnets, Profile.MAX_MAGNETS]),
+		act, false)
+
+func _roll_card() -> PanelContainer:
+	var act := _card_action("ROLL", true, not Profile.can_afford(Profile.RANDOM_SKIN_PRICE))
+	act.pressed.connect(_on_roll_skin)
+	return _list_card(Skins.preview_texture("neon", 96), "Surprise Orb",
+		_price_sub(Profile.RANDOM_SKIN_PRICE, "a brand-new random orb"), act, false)
 
 func _make_label(txt: String, size: int) -> Label:
 	var l := Label.new()
@@ -572,10 +762,8 @@ func _make_coin_icon(size: int) -> ImageTexture:
 	return ImageTexture.create_from_image(img)
 
 # Procedural red heart icon for the lives counter (implicit heart curve).
-func _make_heart_icon(size: int) -> ImageTexture:
+func _make_heart_icon(size: int, fill: Color, shine: Color) -> ImageTexture:
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var fill := Color(0.96, 0.30, 0.38)
-	var shine := Color(1.0, 0.62, 0.66)
 	for py in size:
 		for px in size:
 			var x := (px + 0.5) / float(size) * 2.8 - 1.4
@@ -590,12 +778,12 @@ func _make_heart_icon(size: int) -> ImageTexture:
 	return ImageTexture.create_from_image(img)
 
 # Procedural kite/heater shield icon: flat rounded top, sides tapering to a point.
-func _make_shield_icon(size: int) -> ImageTexture:
+func _make_shield_icon(size: int, filled: bool = true) -> ImageTexture:
 	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var steel := Color(0.58, 0.66, 0.85)
-	var steel_dk := Color(0.34, 0.40, 0.58)
-	var edge := Color(0.18, 0.22, 0.34)
-	var ridge := Color(0.82, 0.88, 0.98)
+	var steel := Color(0.58, 0.66, 0.85) if filled else Color(0.25, 0.27, 0.33)
+	var steel_dk := Color(0.34, 0.40, 0.58) if filled else Color(0.16, 0.17, 0.22)
+	var edge := Color(0.18, 0.22, 0.34) if filled else Color(0.11, 0.12, 0.16)
+	var ridge := Color(0.82, 0.88, 0.98) if filled else Color(0.34, 0.36, 0.42)
 	var cx := size * 0.5
 	var top := size * 0.07
 	var bot := size * 0.96
@@ -628,9 +816,70 @@ func _make_shield_icon(size: int) -> ImageTexture:
 				img.set_pixel(px, py, Color(0, 0, 0, 0))
 	return ImageTexture.create_from_image(img)
 
-func _update_hud_ball() -> void:
-	if hud_ball:
-		hud_ball.texture = Skins.preview_texture(Profile.equipped, 96)
+# Shop preview for a particle effect: a dark orb wrapped in the effect's coloured
+# glow (+ a few sparks). "" (None) is just a faint grey ring.
+func _make_effect_icon(id: String) -> ImageTexture:
+	var size := 96
+	var col := Color(0.45, 0.47, 0.55)
+	match id:
+		"fire": col = Color(1.0, 0.5, 0.15)
+		"electric": col = Color(0.5, 0.85, 1.0)
+		"smoke": col = Color(0.62, 0.62, 0.68)
+		"sparkle": col = Color(1.0, 0.88, 0.4)
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var c := size * 0.5
+	var ballc := Color(0.16, 0.17, 0.23)
+	for y in size:
+		for x in size:
+			var d := Vector2(x - c + 0.5, y - c + 0.5).length() / (size * 0.5)
+			if d > 1.0:
+				img.set_pixel(x, y, Color(0, 0, 0, 0))
+			elif d < 0.42:
+				img.set_pixel(x, y, ballc)
+			else:
+				var a := clampf(1.0 - (d - 0.42) / 0.58, 0.0, 1.0)
+				img.set_pixel(x, y, Color(col.r, col.g, col.b, a * a))
+	if id != "":
+		for sp in [Vector2(0.72, 0.26), Vector2(0.3, 0.74), Vector2(0.8, 0.68), Vector2(0.26, 0.32)]:
+			var px := int(sp.x * size)
+			var py := int(sp.y * size)
+			for oy in range(-2, 3):
+				for ox in range(-2, 3):
+					var qx := px + ox
+					var qy := py + oy
+					var dd := Vector2(ox, oy).length()
+					if qx >= 0 and qx < size and qy >= 0 and qy < size and dd <= 2.2:
+						img.set_pixel(qx, qy, Color(1, 1, 1, clampf(1.0 - dd / 2.2, 0.0, 1.0)))
+	return ImageTexture.create_from_image(img)
+
+# Procedural horseshoe-magnet icon: red U-body, grey poles, open at the top.
+func _make_magnet_icon(size: int) -> ImageTexture:
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var c := size * 0.5
+	var ro := size * 0.42
+	var ri := size * 0.24
+	var red := Color(0.86, 0.18, 0.18)
+	var red_dk := Color(0.6, 0.1, 0.12)
+	var pole := Color(0.80, 0.84, 0.90)
+	var open := 0.62       # half-angle of the top opening
+	var pole_band := 0.5   # angular band at the tips that reads as the metal pole
+	for y in size:
+		for x in size:
+			var dx := (x + 0.5) - c
+			var dy := (y + 0.5) - c
+			var r := sqrt(dx * dx + dy * dy)
+			var aabs := absf(atan2(dx, -dy))  # 0 at top, PI at bottom
+			if r >= ri and r <= ro and aabs > open:
+				var col: Color
+				if aabs < open + pole_band:
+					col = pole
+				else:
+					var t := (r - ri) / (ro - ri)
+					col = red.lerp(red_dk, absf(t - 0.5) * 1.2)
+				img.set_pixel(x, y, col)
+			else:
+				img.set_pixel(x, y, Color(0, 0, 0, 0))
+	return ImageTexture.create_from_image(img)
 
 func _make_screen() -> Control:
 	var c := Control.new()
@@ -660,23 +909,29 @@ func _set_state(s: int) -> void:
 	# (shop / out-of-lives gate, which have their own backdrops).
 	var overlay := s == State.SHOP or s == State.OUTOFLIVES
 	coin_hud.visible = not overlay
-	hud_ball.visible = not overlay
+	# Hearts + shields show together everywhere except the shop / out-of-lives overlays.
+	lives_hud.visible = not overlay
+	shield_hud.visible = not overlay
 	coin_label.text = str(Profile.coins)
 	_refresh_lives()
 	_refresh_shield_hud()
 
-# Lives counter text + visibility (hidden during play/overlays and when the
-# Unlimited Lives entitlement is owned -- there's no limit to show then).
+# Lives = a row of hearts. Filled red for current lives, greyed for the rest;
+# Unlimited Lives shows all five as gold.
 func _refresh_lives() -> void:
 	var unlimited := Ads.has_unlimited_lives()
-	lives_hud.visible = (not unlimited) and (state == State.MENU or state == State.GAMEOVER)
-	if not unlimited:
-		lives_count_label.text = "%d / %d" % [Profile.lives, Profile.MAX_LIVES]
+	for i in _life_pips.size():
+		if unlimited:
+			_life_pips[i].texture = _heart_gold
+		elif i < Profile.lives:
+			_life_pips[i].texture = _heart_full
+		else:
+			_life_pips[i].texture = _heart_empty
 
-# Shield counter: shown only during a run, and only when you're carrying shields.
+# Shields = a row of shield pips (filled for carried, greyed for the rest).
 func _refresh_shield_hud() -> void:
-	shield_hud.visible = (state == State.PLAYING) and (Profile.shields > 0)
-	shield_count_label.text = "x%d" % Profile.shields
+	for i in _shield_pips.size():
+		_shield_pips[i].texture = _shield_full if i < Profile.shields else _shield_empty
 
 # Entry point for RETRY / tap-to-start. Gated by lives: if the player is out
 # (and hasn't bought Unlimited Lives), show the out-of-lives gate instead of starting.
@@ -702,6 +957,7 @@ func _begin_run() -> void:
 	player.reset()
 	shake = 0.0
 	_reward_action = ""
+	_magnet_active = Profile.use_magnet()  # spend one magnet if the player has any
 	_set_state(State.PLAYING)
 
 func _clear_field() -> void:
@@ -793,9 +1049,8 @@ func _on_ads_removed_changed(_removed: bool) -> void:
 # --------------------------------------------------------------------- Shop
 
 func _open_shop() -> void:
-	_rebuild_skins_view()
 	_show_shop_tab("skins")
-	_refresh_shop()
+	shop_coin_label.text = str(Profile.coins)
 	_set_state(State.SHOP)
 
 func _close_shop() -> void:
@@ -808,11 +1063,14 @@ func _on_skin_pressed(id: String) -> void:
 		Profile.equip(id)
 	# else: not enough coins -- leave as-is.
 	player.apply_skin(Profile.equipped)
-	_update_hud_ball()
 	_refresh_shop()
 
 func _on_buy_shield() -> void:
 	if Profile.buy_shield():
+		_refresh_shop()
+
+func _on_buy_magnet() -> void:
+	if Profile.buy_magnet():
 		_refresh_shop()
 
 func _on_roll_skin() -> void:
@@ -820,39 +1078,13 @@ func _on_roll_skin() -> void:
 	if id == "":
 		return
 	player.apply_skin(Profile.equipped)
-	_update_hud_ball()
-	_rebuild_skins_view()
-	_show_shop_tab("skins")  # show off the freshly-rolled (and equipped) orb
-	_refresh_shop()
+	_show_shop_tab("skins")  # switch to skins to show the freshly-rolled orb
+	shop_coin_label.text = str(Profile.coins)
 
 func _refresh_shop() -> void:
-	shop_coin_label.text = "Coins: %d" % Profile.coins
+	shop_coin_label.text = str(Profile.coins)
 	coin_label.text = str(Profile.coins)
-	# Consumables tab
-	if shield_owned_label:
-		shield_owned_label.text = "Shields  %d / %d" % [Profile.shields, Profile.MAX_SHIELDS]
-	if shield_buy_btn:
-		shield_buy_btn.disabled = Profile.shields >= Profile.MAX_SHIELDS \
-			or not Profile.can_afford(Profile.SHIELD_PRICE)
-	if roll_btn:
-		roll_btn.disabled = not Profile.can_afford(Profile.RANDOM_SKIN_PRICE)
-	# Skins tab (catalog + owned random skins; _skin_buttons is rebuilt per open)
-	for id in _skin_buttons.keys():
-		var b: Button = _skin_buttons[id]
-		var s: Dictionary = Skins.get_skin(id)
-		var nm := str(s["name"])
-		var price := int(s["price"])
-		var equipped: bool = Profile.equipped == id
-		if equipped:
-			b.text = "%s  -  Equipped" % nm
-			b.disabled = false
-		elif Profile.is_owned(id):
-			b.text = "%s  -  Tap to equip" % nm
-			b.disabled = false
-		else:
-			b.text = "%s  -  %d" % [nm, price]
-			b.disabled = not Profile.can_afford(price)
-		_apply_button_style(b, equipped)
+	_rebuild_shop_content()
 
 # -------------------------------------------------------------------- Gameplay
 
@@ -899,15 +1131,23 @@ func _spawn_wall() -> void:
 	w.crossed.connect(_on_wall_crossed)
 	_newest_wall = w
 	walls.append(w)
-	# Drop a collectable coin in the gap ahead of this wall.
-	_spawn_coin(SPAWN_Z + SPAWN_SPACING * 0.5)
+	# A field of coins ahead of this wall -- denser as you climb, so a Coin Magnet
+	# (which sweeps the whole width) is worth more and more the higher you score.
+	_spawn_coins(SPAWN_Z + SPAWN_SPACING * 0.5)
 
-func _spawn_coin(z: float) -> void:
-	var c := Coin.new()
-	add_child(c)
-	c.setup(_current_speed(), player, z, randf_range(-ARENA_HALF, ARENA_HALF))
-	c.collected.connect(_on_coin_collected)
-	coins.append(c)
+func _spawn_coins(z: float) -> void:
+	var count := clampi(2 + score / 8, 2, 7)
+	for i in count:
+		var c := Coin.new()
+		add_child(c)
+		# Spread across the full width (hard to grab them all by hand -- that's
+		# what the magnet is for), with a little jitter + depth stagger.
+		var x := lerpf(-ARENA_HALF, ARENA_HALF, (i + 0.5) / float(count)) + randf_range(-0.4, 0.4)
+		var cz := z + randf_range(-2.2, 2.2)
+		c.setup(_current_speed(), player, cz, clampf(x, -ARENA_HALF, ARENA_HALF))
+		c.magnet = _magnet_active
+		c.collected.connect(_on_coin_collected)
+		coins.append(c)
 
 func _on_coin_collected() -> void:
 	if state != State.PLAYING:
@@ -985,8 +1225,7 @@ func _save_best() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	match state:
 		State.MENU:
-			if _is_tap(event):
-				_start_game()
+			pass  # PLAY / SHOP buttons handle input
 		State.GAMEOVER:
 			pass  # explicit RETRY / MENU / REVIVE buttons handle input
 		State.SHOP:

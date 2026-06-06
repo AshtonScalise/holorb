@@ -7,8 +7,11 @@ const RADIUS := 0.32
 const PICKUP_DIST := 0.95
 const DESPAWN_Z := 9.0
 const FLOAT_Y := 0.6
+const ATTRACT_RANGE := 7.5   # magnet starts pulling within this distance
+const MAGNET_PULL := 24.0     # how fast a magnetized coin homes in
 
 var speed := 8.0
+var magnet := false          # set per-coin when the Coin Magnet item is active
 var _player: Node3D
 var _mesh: MeshInstance3D
 
@@ -40,6 +43,15 @@ func _build() -> void:
 func _physics_process(delta: float) -> void:
 	position.z += speed * delta
 	_mesh.rotate_y(delta * 5.0)
+
+	# Coin Magnet: home in on the player once close enough.
+	if magnet and _player:
+		var to := _player.position - position
+		to.y = 0.0
+		if to.length() < ATTRACT_RANGE:
+			var step := MAGNET_PULL * delta
+			position.x = move_toward(position.x, _player.position.x, step)
+			position.z = move_toward(position.z, _player.position.z, step)
 
 	if _player:
 		var dx := position.x - _player.position.x

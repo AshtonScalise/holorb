@@ -12,14 +12,19 @@ const LIVES_PER_AD := 3
 ## Consumables -- coin sinks so coins are always worth earning.
 const MAX_SHIELDS := 5      # carry up to this many single-use shields into a run
 const SHIELD_PRICE := 75    # coins per shield
+const MAX_MAGNETS := 5      # single-use coin magnets (one consumed per run)
+const MAGNET_PRICE := 50    # coins per magnet
 const RANDOM_SKIN_PRICE := 150  # coins for a "Surprise Orb" random skin
 
 var coins := 0
 var owned := { "checker": true }
 var equipped := "checker"
+var owned_effects := { "": true }   # particle effects owned (none is always owned)
+var equipped_effect := ""           # currently equipped effect ("" = none)
 var lives := MAX_LIVES
 var last_refill := ""  # "YYYY-MM-DD" (local) of the last daily refill
 var shields := 0       # stackable single-use shields (each absorbs one hit)
+var magnets := 0       # stackable single-use coin magnets (one consumed per run)
 
 func _ready() -> void:
 	_load()
@@ -79,6 +84,22 @@ func buy_shield() -> bool:
 	save()
 	return true
 
+## Consume one magnet for a run. Returns true if there was one to spend.
+func use_magnet() -> bool:
+	if magnets > 0:
+		magnets -= 1
+		save()
+		return true
+	return false
+
+func buy_magnet() -> bool:
+	if magnets >= MAX_MAGNETS or coins < MAGNET_PRICE:
+		return false
+	coins -= MAGNET_PRICE
+	magnets += 1
+	save()
+	return true
+
 ## Buy a fresh random "Surprise Orb" skin and equip it. Returns the new id, or "".
 func roll_random_skin() -> String:
 	if coins < RANDOM_SKIN_PRICE:
@@ -119,6 +140,28 @@ func equip(id: String) -> void:
 		equipped = id
 		save()
 
+# -------------------------------------------------------------- Effects (mix & match)
+
+func is_effect_owned(id: String) -> bool:
+	return id == "" or owned_effects.has(id)
+
+func buy_effect(id: String) -> bool:
+	if is_effect_owned(id):
+		return true
+	var e := Skins.get_effect(id)
+	var price: int = e["price"]
+	if coins < price:
+		return false
+	coins -= price
+	owned_effects[id] = true
+	save()
+	return true
+
+func equip_effect(id: String) -> void:
+	if is_effect_owned(id):
+		equipped_effect = id
+		save()
+
 func save() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("profile", "coins", coins)
@@ -127,6 +170,9 @@ func save() -> void:
 	cf.set_value("profile", "lives", lives)
 	cf.set_value("profile", "last_refill", last_refill)
 	cf.set_value("profile", "shields", shields)
+	cf.set_value("profile", "magnets", magnets)
+	cf.set_value("profile", "owned_effects", owned_effects.keys())
+	cf.set_value("profile", "equipped_effect", equipped_effect)
 	cf.save(PATH)
 
 func _load() -> void:
@@ -140,8 +186,15 @@ func _load() -> void:
 		lives = int(cf.get_value("profile", "lives", MAX_LIVES))
 		last_refill = str(cf.get_value("profile", "last_refill", ""))
 		shields = int(cf.get_value("profile", "shields", 0))
+		magnets = int(cf.get_value("profile", "magnets", 0))
+		owned_effects = { "": true }
+		for eid in cf.get_value("profile", "owned_effects", []):
+			owned_effects[eid] = true
+		equipped_effect = str(cf.get_value("profile", "equipped_effect", ""))
 	# Always own the default skin.
 	if not owned.has("checker"):
 		owned["checker"] = true
 	if not is_owned(equipped):
 		equipped = "checker"
+	if not is_effect_owned(equipped_effect):
+		equipped_effect = ""

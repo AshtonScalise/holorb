@@ -10,7 +10,26 @@ const CATALOG := [
 	{ "id": "eye", "name": "Eyeball", "price": 200 },
 	{ "id": "neon", "name": "Neon", "price": 350 },
 	{ "id": "gold", "name": "Gold", "price": 600 },
+	{ "id": "inferno", "name": "Inferno", "price": 400 },
+	{ "id": "phantom", "name": "Phantom", "price": 500 },
+	{ "id": "plasma", "name": "Plasma", "price": 650 },
 ]
+
+## Particle effects are SEPARATE equippable cosmetics -- mix any effect with any
+## skin. The actual particle configs live in Player.apply_effect().
+const EFFECTS := [
+	{ "id": "", "name": "None", "price": 0 },
+	{ "id": "sparkle", "name": "Sparkle", "price": 750 },
+	{ "id": "electric", "name": "Electric", "price": 1200 },
+	{ "id": "smoke", "name": "Smoke", "price": 1500 },
+	{ "id": "fire", "name": "Fire", "price": 2000 },
+]
+
+static func get_effect(id: String) -> Dictionary:
+	for e in EFFECTS:
+		if e["id"] == id:
+			return e
+	return EFFECTS[0]
 
 ## Random ("Surprise Orb") skins are generated on the fly from a seed baked into
 ## the id ("rnd_<seed>"), so there's an endless supply -- a perfect coin sink.
@@ -62,6 +81,21 @@ static func make_material(id: String) -> StandardMaterial3D:
 		"gold":
 			m.metallic = 1.0
 			m.roughness = 0.24
+		"inferno":
+			m.emission_enabled = true
+			m.emission_texture = tex
+			m.emission = Color(1.0, 0.4, 0.1)
+			m.emission_energy_multiplier = 1.4
+			m.roughness = 0.5
+		"phantom":
+			m.roughness = 0.72
+		"plasma":
+			m.emission_enabled = true
+			m.emission_texture = tex
+			m.emission = Color(0.6, 0.4, 1.0)
+			m.emission_energy_multiplier = 1.5
+			m.metallic = 0.3
+			m.roughness = 0.3
 	return m
 
 # The texture actually wrapped on the 3D ball. Most skins use a repeating flat
@@ -142,6 +176,14 @@ static func _pattern_image(id: String) -> Image:
 			return _checker(128, 128, 8, 8, Color(0.0, 0.9, 0.9), Color(0.0, 0.18, 0.22)).get_image()
 		"gold":
 			return _checker(64, 32, 8, 4, Color(1.0, 0.85, 0.32), Color(0.74, 0.54, 0.12)).get_image()
+		"inferno":
+			return _stripes(192, 96, [
+				Color(0.12, 0.04, 0.02), Color(0.95, 0.32, 0.08),
+				Color(1.0, 0.72, 0.18), Color(0.72, 0.1, 0.03)]).get_image()
+		"phantom":
+			return _checker(96, 48, 8, 4, Color(0.21, 0.22, 0.30), Color(0.08, 0.08, 0.12)).get_image()
+		"plasma":
+			return _checker(128, 64, 10, 5, Color(0.66, 0.26, 0.96), Color(0.16, 0.86, 0.96)).get_image()
 		_:  # "checker" / default
 			return _checker(128, 64, 8, 4, Color(0.95, 0.32, 0.26), Color(0.98, 0.86, 0.55)).get_image()
 
