@@ -42,11 +42,21 @@ var coin_hud: HBoxContainer
 var coins_gained_label: Label
 var shop_root: Control
 var shop_coin_label: Label
+# Item-detail modal (one reusable popup for every shop item)
+var modal_root: Control
+var _modal_icon: TextureRect
+var _modal_title: Label
+var _modal_desc: Label
+var _modal_info: Label
+var _modal_action_btn: Button
+var _modal_action := Callable()
 var skins_tab_btn: Button
 var effects_tab_btn: Button
 var items_tab_btn: Button
 var _content_list: VBoxContainer   # the scrollable list, rebuilt per tab
 var _shop_tab := "skins"
+var _card_press_pos := Vector2.ZERO  # for tap-vs-drag detection on cards
+var _card_moved := false
 
 # Lives + shields HUD, Zelda-style pip rows, top-left (never shown at the same
 # time -- lives on menu/game-over, shields during a run).
@@ -63,6 +73,7 @@ var _shield_empty: ImageTexture
 # Ads / IAP -- the out-of-lives gate (watch ad for lives, or buy Unlimited Lives)
 var _reward_action := ""  # "lives" or "coins" -- what the next rewarded ad is for
 var outoflives_root: Control
+var oot_title_label: Label
 var oot_watch_btn: Button
 var oot_timer_label: Label
 var ad_coins_btn: Button
@@ -259,12 +270,14 @@ func _build_ui() -> void:
 	_shield_full = _make_shield_icon(48, true)
 	_shield_empty = _make_shield_icon(48, false)
 
-	# Lives: a Zelda-style row of 5 hearts, top-left (menu & game-over).
+	# Lives: a Zelda-style row of 5 hearts, top-left (menu & game-over). Tappable to
+	# open the lives menu (refill via ad / buy Unlimited Lives).
 	lives_hud = HBoxContainer.new()
 	lives_hud.set_anchors_preset(Control.PRESET_TOP_LEFT)
 	lives_hud.position = Vector2(28, 40)
 	lives_hud.add_theme_constant_override("separation", 4)
 	lives_hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	lives_hud.gui_input.connect(_on_lives_hud_input)
 	ui.add_child(lives_hud)
 	for i in Profile.MAX_LIVES:
 		var pip := TextureRect.new()
@@ -293,6 +306,7 @@ func _build_ui() -> void:
 
 	_build_shop()
 	_build_outoflives()
+	_build_item_modal()
 
 # Out-of-lives gate: shown when the player has 0 lives. They can watch a rewarded
 # ad for more lives, buy Unlimited Lives, or wait for the daily refill. Never forced.
@@ -306,7 +320,8 @@ func _build_outoflives() -> void:
 	ui.add_child(outoflives_root)
 
 	var v := _make_vbox(outoflives_root)
-	v.add_child(_make_label("OUT OF LIVES", 64))
+	oot_title_label = _make_label("OUT OF LIVES", 64)
+	v.add_child(oot_title_label)
 	oot_timer_label = _make_label("", 32)
 	oot_timer_label.add_theme_color_override("font_color", Color(0.7, 0.74, 0.85))
 	v.add_child(oot_timer_label)
@@ -316,12 +331,92 @@ func _build_outoflives() -> void:
 	oot_watch_btn = _make_button("WATCH AD    +%d  LIVES" % Profile.LIVES_PER_AD, 36, true)
 	oot_watch_btn.pressed.connect(_on_watch_ad_lives)
 	v.add_child(oot_watch_btn)
-	var unl := _make_button("UNLIMITED LIVES", 32)
-	unl.pressed.connect(_on_buy_unlimited)
-	v.add_child(unl)
 	var back := _make_button("MENU", 30)
 	back.pressed.connect(_go_to_menu)
 	v.add_child(back)
+
+# One reusable item-detail modal: icon, title, description, price/status line,
+# a primary action button, and Back. Populated per-item by _open_item_modal().
+func _build_item_modal() -> void:
+	modal_root = Control.new()
+	modal_root.set_anchors_preset(Control.PRESET_FULL_RECT)
+	modal_root.mouse_filter = Control.MOUSE_FILTER_STOP
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.62)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	modal_root.add_child(dim)
+	ui.add_child(modal_root)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	modal_root.add_child(center)
+	var card := PanelContainer.new()
+	card.add_theme_stylebox_override("panel", _card_style(false))
+	card.custom_minimum_size = Vector2(600, 0)
+	center.add_child(card)
+	var m := MarginContainer.new()
+	m.add_theme_constant_override("margin_left", 34)
+	m.add_theme_constant_override("margin_top", 34)
+	m.add_theme_constant_override("margin_right", 34)
+	m.add_theme_constant_override("margin_bottom", 34)
+	card.add_child(m)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override("separation", 16)
+	m.add_child(v)
+	_modal_icon = TextureRect.new()
+	_modal_icon.custom_minimum_size = Vector2(120, 120)
+	_modal_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_modal_icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	v.add_child(_modal_icon)
+	_modal_title = _make_label("", 44)
+	v.add_child(_modal_title)
+	_modal_desc = _make_label("", 28)
+	_modal_desc.add_theme_color_override("font_color", Color(0.72, 0.76, 0.88))
+	_modal_desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(_modal_desc)
+	_modal_info = _make_label("", 26)
+	_modal_info.add_theme_color_override("font_color", Color(1.0, 0.86, 0.3))
+	v.add_child(_modal_info)
+	var sp := Control.new()
+	sp.custom_minimum_size = Vector2(0, 8)
+	v.add_child(sp)
+	_modal_action_btn = _make_button("", 34, true)
+	_modal_action_btn.pressed.connect(_modal_do_action)
+	v.add_child(_modal_action_btn)
+	var back := _make_button("BACK", 30)
+	back.pressed.connect(_close_item_modal)
+	v.add_child(back)
+
+	modal_root.visible = false
+
+# Populate + show the modal. action_label == "" hides the action button.
+func _open_item_modal(icon: Texture2D, title: String, desc: String, info: String,
+		action_label: String, action: Callable, action_enabled: bool) -> void:
+	_modal_icon.texture = icon
+	_modal_title.text = title
+	_modal_desc.text = desc
+	_modal_desc.visible = desc != ""
+	_modal_info.text = info
+	_modal_info.visible = info != ""
+	if action_label == "":
+		_modal_action_btn.visible = false
+		_modal_action = Callable()
+	else:
+		_modal_action_btn.visible = true
+		_modal_action_btn.text = action_label
+		_modal_action_btn.disabled = not action_enabled
+		_modal_action = action
+	modal_root.visible = true
+
+func _close_item_modal() -> void:
+	modal_root.visible = false
+
+func _modal_do_action() -> void:
+	_close_item_modal()
+	if _modal_action.is_valid():
+		_modal_action.call()
 
 func _build_shop() -> void:
 	shop_root = _make_screen()
@@ -382,36 +477,47 @@ func _build_shop() -> void:
 	items_tab_btn = _make_tab_button("ITEMS", "items")
 	tabs.add_child(items_tab_btn)
 
-	# Body panel (card) wrapping the scrollable list.
+	# Body panel: a fixed "Earn Coins" card at the top + the scrollable list below.
 	var panel := PanelContainer.new()
 	panel.add_theme_stylebox_override("panel", _shop_panel_style())
 	panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	panel.clip_contents = true
 	tab_group.add_child(panel)
+	var panel_v := VBoxContainer.new()
+	panel_v.add_theme_constant_override("separation", 0)
+	panel.add_child(panel_v)
+
+	# Sticky "Earn Coins" card -- always at the top of the list, never scrolls.
+	var top_pad := MarginContainer.new()
+	top_pad.add_theme_constant_override("margin_left", 16)
+	top_pad.add_theme_constant_override("margin_top", 14)
+	top_pad.add_theme_constant_override("margin_right", 16)
+	top_pad.add_theme_constant_override("margin_bottom", 10)
+	panel_v.add_child(top_pad)
+	top_pad.add_child(_coins_card())
+
 	var scroll := ScrollContainer.new()
 	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	# Hidden scrollbar (drag/touch scrolling still works) so it never steals width
-	# from the list -- keeps left/right padding symmetric on every tab.
-	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	# Slim scrollbar, shown only when the list actually overflows; drag/touch
+	# scrolling works too.
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	panel.add_child(scroll)
-	# Padding lives INSIDE the scroll: symmetric left/right, plus bottom breathing
-	# room so the last card is fully reachable.
+	panel_v.add_child(scroll)
+	_style_thin_scrollbar(scroll)
 	var pad := MarginContainer.new()
 	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pad.mouse_filter = Control.MOUSE_FILTER_IGNORE  # let card input reach the scroll
 	pad.add_theme_constant_override("margin_left", 16)
-	pad.add_theme_constant_override("margin_top", 14)
+	pad.add_theme_constant_override("margin_top", 0)
 	pad.add_theme_constant_override("margin_right", 16)
 	pad.add_theme_constant_override("margin_bottom", 30)
 	scroll.add_child(pad)
 	_content_list = VBoxContainer.new()
 	_content_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_content_list.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_content_list.add_theme_constant_override("separation", 10)
 	pad.add_child(_content_list)
-
-	# Persistent "Free Coins" faucet -- always shown above Back, on both tabs.
-	col.add_child(_coins_card())
 
 	var back := _make_button("Back", 32)
 	back.size_flags_horizontal = Control.SIZE_FILL
@@ -456,6 +562,23 @@ func _apply_tab_style(b: Button, active: bool) -> void:
 	b.add_theme_color_override("font_hover_color", Color(1, 1, 1))
 	b.add_theme_color_override("font_pressed_color", fc)
 
+# Make a ScrollContainer's vertical bar very thin (an 8px rounded pill).
+func _style_thin_scrollbar(sc: ScrollContainer) -> void:
+	var vsb := sc.get_v_scroll_bar()
+	if vsb == null:
+		return
+	vsb.custom_minimum_size = Vector2(8, 0)
+	vsb.add_theme_stylebox_override("scroll", StyleBoxEmpty.new())
+	vsb.add_theme_stylebox_override("scroll_focus", StyleBoxEmpty.new())
+	var grab := StyleBoxFlat.new()
+	grab.bg_color = Color(0.42, 0.46, 0.60, 0.85)
+	grab.set_corner_radius_all(4)
+	vsb.add_theme_stylebox_override("grabber", grab)
+	var grab_hi := grab.duplicate()
+	grab_hi.bg_color = Color(0.56, 0.61, 0.80, 0.95)
+	vsb.add_theme_stylebox_override("grabber_highlight", grab_hi)
+	vsb.add_theme_stylebox_override("grabber_pressed", grab_hi)
+
 func _shop_panel_style() -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = Color(0.08, 0.09, 0.15, 0.98)
@@ -482,7 +605,9 @@ func _card_style(highlight: bool) -> StyleBoxFlat:
 	return s
 
 # A flat list-item card: preview icon + title/subtitle + right action button.
-func _list_card(icon: Texture2D, title: String, sub: Control, action: Button, highlight: bool) -> PanelContainer:
+# A tappable list row: icon + title + sub + a chevron. The whole card opens the
+# item-detail modal via on_tap (no inline action button).
+func _list_card(icon: Texture2D, title: String, sub: Control, on_tap: Callable, highlight: bool) -> PanelContainer:
 	var card := PanelContainer.new()
 	card.add_theme_stylebox_override("panel", _card_style(highlight))
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -494,6 +619,7 @@ func _list_card(icon: Texture2D, title: String, sub: Control, action: Button, hi
 	card.add_child(m)
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 16)
+	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	m.add_child(row)
 	var pic := TextureRect.new()
 	pic.texture = icon
@@ -505,6 +631,7 @@ func _list_card(icon: Texture2D, title: String, sub: Control, action: Button, hi
 	info.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	info.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	info.add_theme_constant_override("separation", 4)
+	info.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	row.add_child(info)
 	var tl := Label.new()
 	tl.text = title
@@ -514,10 +641,41 @@ func _list_card(icon: Texture2D, title: String, sub: Control, action: Button, hi
 	info.add_child(tl)
 	if sub:
 		info.add_child(sub)
-	if action:
-		action.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		row.add_child(action)
+	var chev := Label.new()
+	chev.text = ">"
+	chev.add_theme_font_size_override("font_size", 38)
+	chev.add_theme_color_override("font_color", Color(0.45, 0.5, 0.62))
+	chev.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	chev.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	row.add_child(chev)
+	# Whole card is tappable, but we do NOT use a Button (that would eat drags and
+	# block list scrolling). Instead the card passes input through (MOUSE_FILTER_PASS)
+	# so the ScrollContainer can scroll, and we detect a "tap" vs a "drag" ourselves.
+	if on_tap.is_valid():
+		card.mouse_filter = Control.MOUSE_FILTER_PASS
+		card.gui_input.connect(_on_card_input.bind(on_tap))
 	return card
+
+# Distinguish a tap (open the item) from a drag (let the list scroll).
+func _on_card_input(event: InputEvent, on_tap: Callable) -> void:
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			_card_press_pos = event.position
+			_card_moved = false
+		elif not _card_moved:
+			on_tap.call()
+	elif event is InputEventScreenDrag:
+		if event.position.distance_to(_card_press_pos) > 12.0:
+			_card_moved = true
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			_card_press_pos = event.position
+			_card_moved = false
+		elif not _card_moved:
+			on_tap.call()
+	elif event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
+		if event.position.distance_to(_card_press_pos) > 12.0:
+			_card_moved = true
 
 func _sub_label(text: String, color: Color) -> Label:
 	var l := Label.new()
@@ -590,26 +748,47 @@ func _rebuild_shop_content() -> void:
 		_content_list.add_child(_shield_card())
 		_content_list.add_child(_magnet_card())
 
+# Short status/price line for a list card (full detail lives in the modal).
+func _status_sub(owned: bool, equipped: bool, price: int) -> Control:
+	if equipped:
+		return _sub_label("Equipped", Color(0.6, 0.9, 0.66))
+	if owned:
+		return _sub_label("Owned", Color(0.7, 0.78, 0.92))
+	return _price_sub(price, "")
+
 func _effect_card(id: String) -> PanelContainer:
 	var e := Skins.get_effect(id)
-	var nm := str(e["name"])
-	var price := int(e["price"])
-	var owned := Profile.is_effect_owned(id)
 	var equipped: bool = Profile.equipped_effect == id
-	var sub: Control
-	var act: Button
-	if equipped:
-		sub = _sub_label("Equipped", Color(0.6, 0.9, 0.66))
-		act = _card_action("EQUIPPED", true, true)
-	elif owned:
-		sub = _sub_label("Owned", Color(0.7, 0.78, 0.92))
-		act = _card_action("EQUIP", false, false)
-		act.pressed.connect(_on_effect_pressed.bind(id))
-	else:
-		sub = _price_sub(price, "")
-		act = _card_action("BUY", true, not Profile.can_afford(price))
-		act.pressed.connect(_on_effect_pressed.bind(id))
-	return _list_card(_make_effect_icon(id), nm, sub, act, equipped)
+	return _list_card(_make_effect_icon(id), str(e["name"]),
+		_status_sub(Profile.is_effect_owned(id), equipped, int(e["price"])),
+		_open_effect_modal.bind(id), equipped)
+
+func _open_effect_modal(id: String) -> void:
+	var e := Skins.get_effect(id)
+	var price := int(e["price"])
+	var equipped: bool = Profile.equipped_effect == id
+	var info := "Equipped"
+	var label := ""
+	var enabled := false
+	if not equipped:
+		if Profile.is_effect_owned(id):
+			info = "Owned"
+			label = "EQUIP"
+			enabled = true
+		else:
+			info = "%d coins" % price
+			label = "BUY"
+			enabled = Profile.can_afford(price)
+	_open_item_modal(_make_effect_icon(id, 120), str(e["name"]), _effect_desc(id), info,
+		label, _on_effect_pressed.bind(id), enabled)
+
+func _effect_desc(id: String) -> String:
+	match id:
+		"fire": return "Flames trail your orb as it rolls."
+		"electric": return "Crackling sparks orbit your orb."
+		"smoke": return "A smoky plume drifts off your orb."
+		"sparkle": return "Golden sparkles shimmer around your orb."
+		_: return "No particle effect."
 
 func _on_effect_pressed(id: String) -> void:
 	if Profile.is_effect_owned(id):
@@ -623,51 +802,72 @@ func _on_effect_pressed(id: String) -> void:
 
 func _skin_card(id: String) -> PanelContainer:
 	var s := Skins.get_skin(id)
-	var nm := str(s["name"])
-	var price := int(s["price"])
-	var owned := Profile.is_owned(id)
 	var equipped: bool = Profile.equipped == id
-	var sub: Control
-	var act: Button
-	if equipped:
-		sub = _sub_label("Equipped", Color(0.6, 0.9, 0.66))
-		act = _card_action("EQUIPPED", true, true)
-	elif owned:
-		sub = _sub_label("Owned", Color(0.7, 0.78, 0.92))
-		act = _card_action("EQUIP", false, false)
-		act.pressed.connect(_on_skin_pressed.bind(id))
-	else:
-		sub = _price_sub(price, "")
-		act = _card_action("BUY", true, not Profile.can_afford(price))
-		act.pressed.connect(_on_skin_pressed.bind(id))
-	return _list_card(Skins.preview_texture(id, 96), nm, sub, act, equipped)
+	return _list_card(Skins.preview_texture(id, 96), str(s["name"]),
+		_status_sub(Profile.is_owned(id), equipped, int(s["price"])),
+		_open_skin_modal.bind(id), equipped)
+
+func _open_skin_modal(id: String) -> void:
+	var s := Skins.get_skin(id)
+	var price := int(s["price"])
+	var equipped: bool = Profile.equipped == id
+	var desc := "A one-of-a-kind procedurally-generated orb." if Skins.is_random(id) else "A cosmetic skin for your orb."
+	var info := "Equipped"
+	var label := ""
+	var enabled := false
+	if not equipped:
+		if Profile.is_owned(id):
+			info = "Owned"
+			label = "EQUIP"
+			enabled = true
+		else:
+			info = "%d coins" % price
+			label = "BUY"
+			enabled = Profile.can_afford(price)
+	_open_item_modal(Skins.preview_texture(id, 120), str(s["name"]), desc, info,
+		label, _on_skin_pressed.bind(id), enabled)
 
 func _coins_card() -> PanelContainer:
-	var act := _card_action("+%d" % AD_COINS_REWARD, true, false)
-	act.pressed.connect(_on_watch_ad_coins)
-	return _list_card(_make_coin_icon(96), "Earn Coins",
-		_sub_label("Watch a short ad", Color(0.66, 0.71, 0.85)), act, false)
+	return _list_card(_make_coin_icon(96), "Earn Coins", null, _open_coins_modal, true)
+
+func _open_coins_modal() -> void:
+	_open_item_modal(_make_coin_icon(120), "Earn Coins",
+		"Watch a short ad to earn +%d coins." % AD_COINS_REWARD, "",
+		"WATCH AD", _on_watch_ad_coins, true)
 
 func _shield_card() -> PanelContainer:
-	var disabled := Profile.shields >= Profile.MAX_SHIELDS or not Profile.can_afford(Profile.SHIELD_PRICE)
-	var act := _card_action("BUY", true, disabled)
-	act.pressed.connect(_on_buy_shield)
 	return _list_card(_make_shield_icon(96), "Shield",
-		_price_sub(Profile.SHIELD_PRICE, "owned %d/%d" % [Profile.shields, Profile.MAX_SHIELDS]), act, false)
+		_price_sub(Profile.SHIELD_PRICE, "owned %d/%d" % [Profile.shields, Profile.MAX_SHIELDS]),
+		_open_shield_modal, false)
+
+func _open_shield_modal() -> void:
+	var enabled := Profile.shields < Profile.MAX_SHIELDS and Profile.can_afford(Profile.SHIELD_PRICE)
+	_open_item_modal(_make_shield_icon(120), "Shield",
+		"Absorbs one wall hit instead of ending your run. Carry up to %d into a run." % Profile.MAX_SHIELDS,
+		"%d coins   ·   owned %d/%d" % [Profile.SHIELD_PRICE, Profile.shields, Profile.MAX_SHIELDS],
+		"BUY", _on_buy_shield, enabled)
 
 func _magnet_card() -> PanelContainer:
-	var disabled := Profile.magnets >= Profile.MAX_MAGNETS or not Profile.can_afford(Profile.MAGNET_PRICE)
-	var act := _card_action("BUY", true, disabled)
-	act.pressed.connect(_on_buy_magnet)
 	return _list_card(_make_magnet_icon(96), "Coin Magnet",
-		_price_sub(Profile.MAGNET_PRICE, "owned %d/%d  ·  one run, pulls in coins" % [Profile.magnets, Profile.MAX_MAGNETS]),
-		act, false)
+		_price_sub(Profile.MAGNET_PRICE, "owned %d/%d" % [Profile.magnets, Profile.MAX_MAGNETS]),
+		_open_magnet_modal, false)
+
+func _open_magnet_modal() -> void:
+	var enabled := Profile.magnets < Profile.MAX_MAGNETS and Profile.can_afford(Profile.MAGNET_PRICE)
+	_open_item_modal(_make_magnet_icon(120), "Coin Magnet",
+		"For one run, coins fly to your orb so you sweep the whole field. Worth more the higher you score.",
+		"%d coins   ·   owned %d/%d" % [Profile.MAGNET_PRICE, Profile.magnets, Profile.MAX_MAGNETS],
+		"BUY", _on_buy_magnet, enabled)
 
 func _roll_card() -> PanelContainer:
-	var act := _card_action("ROLL", true, not Profile.can_afford(Profile.RANDOM_SKIN_PRICE))
-	act.pressed.connect(_on_roll_skin)
 	return _list_card(Skins.preview_texture("neon", 96), "Surprise Orb",
-		_price_sub(Profile.RANDOM_SKIN_PRICE, "a brand-new random orb"), act, false)
+		_price_sub(Profile.RANDOM_SKIN_PRICE, "random orb"), _open_roll_modal, false)
+
+func _open_roll_modal() -> void:
+	_open_item_modal(Skins.preview_texture("neon", 120), "Surprise Orb",
+		"Unlock a brand-new, one-of-a-kind procedurally-generated orb skin.",
+		"%d coins" % Profile.RANDOM_SKIN_PRICE,
+		"ROLL", _on_roll_skin, Profile.can_afford(Profile.RANDOM_SKIN_PRICE))
 
 func _make_label(txt: String, size: int) -> Label:
 	var l := Label.new()
@@ -818,8 +1018,7 @@ func _make_shield_icon(size: int, filled: bool = true) -> ImageTexture:
 
 # Shop preview for a particle effect: a dark orb wrapped in the effect's coloured
 # glow (+ a few sparks). "" (None) is just a faint grey ring.
-func _make_effect_icon(id: String) -> ImageTexture:
-	var size := 96
+func _make_effect_icon(id: String, size: int = 96) -> ImageTexture:
 	var col := Color(0.45, 0.47, 0.55)
 	match id:
 		"fire": col = Color(1.0, 0.5, 0.15)
@@ -907,10 +1106,14 @@ func _set_state(s: int) -> void:
 	score_label.visible = (s == State.PLAYING)
 	# Coin counter + equipped-ball preview show everywhere except overlays
 	# (shop / out-of-lives gate, which have their own backdrops).
+	if modal_root:
+		modal_root.visible = false
 	var overlay := s == State.SHOP or s == State.OUTOFLIVES
 	coin_hud.visible = not overlay
 	# Hearts + shields show together everywhere except the shop / out-of-lives overlays.
 	lives_hud.visible = not overlay
+	# Hearts are tappable (open the lives menu) only on menu / game-over.
+	lives_hud.mouse_filter = Control.MOUSE_FILTER_STOP if (s == State.MENU or s == State.GAMEOVER) else Control.MOUSE_FILTER_IGNORE
 	shield_hud.visible = not overlay
 	coin_label.text = str(Profile.coins)
 	_refresh_lives()
@@ -942,7 +1145,25 @@ func _start_game() -> void:
 		return
 	_begin_run()
 
+func _on_lives_hud_input(event: InputEvent) -> void:
+	if state != State.MENU and state != State.GAMEOVER:
+		return
+	if Ads.has_unlimited_lives():
+		return  # nothing to refill/buy
+	var released := false
+	if event is InputEventScreenTouch and not event.pressed:
+		released = true
+	elif event is InputEventMouseButton and not event.pressed:
+		released = true
+	if released:
+		_show_outoflives()
+
 func _show_outoflives() -> void:
+	# Doubles as the "lives menu" (tap the hearts): title reflects current lives.
+	if Profile.has_lives():
+		oot_title_label.text = "LIVES   %d / %d" % [Profile.lives, Profile.MAX_LIVES]
+	else:
+		oot_title_label.text = "OUT OF LIVES"
 	oot_watch_btn.visible = Ads.is_rewarded_ready()
 	var s := Profile.seconds_until_refill()
 	oot_timer_label.text = "Free lives in %dh %dm" % [s / 3600, (s % 3600) / 60]

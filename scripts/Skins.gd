@@ -42,9 +42,28 @@ static func _seed_of(id: String) -> int:
 static func new_random_id() -> String:
 	return "rnd_" + str(randi())
 
+## Deterministic fantasy name for a random orb (WoW-demon flavour), from its seed.
+const _NAME_PRE := ["Mal", "Az", "Vor", "Zar", "Kael", "Nyx", "Vex", "Thar", "Gor",
+	"Xan", "Bel", "Dra", "Kor", "Ner", "Syl", "Vol", "Zer", "Mor", "Grim", "Hex",
+	"Ur", "Tal", "Fen", "Cith", "Rax"]
+const _NAME_MID := ["a", "o", "u", "ga", "tha", "ze", "ru", "ka", "il", "or", "ae", "yth"]
+const _NAME_SUF := ["oth", "ix", "ar", "us", "eth", "ull", "ax", "orn", "ys", "aal",
+	"ux", "ek", "ron", "is", "oz", "ith", "agg"]
+
+static func random_name(seed_val: int) -> String:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = seed_val ^ 0x1234ABCD
+	var nm: String = _NAME_PRE[rng.randi() % _NAME_PRE.size()]
+	if rng.randf() < 0.55:
+		nm += _NAME_MID[rng.randi() % _NAME_MID.size()]
+	if rng.randf() < 0.4:
+		nm += "'"
+	nm += _NAME_SUF[rng.randi() % _NAME_SUF.size()]
+	return nm
+
 static func get_skin(id: String) -> Dictionary:
 	if is_random(id):
-		return { "id": id, "name": "Surprise Orb", "price": 0 }
+		return { "id": id, "name": random_name(_seed_of(id)), "price": 0 }
 	for s in CATALOG:
 		if s["id"] == id:
 			return s
