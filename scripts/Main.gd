@@ -645,7 +645,7 @@ func _skin_card(id: String) -> PanelContainer:
 func _coins_card() -> PanelContainer:
 	var act := _card_action("+%d" % AD_COINS_REWARD, true, false)
 	act.pressed.connect(_on_watch_ad_coins)
-	return _list_card(_make_coin_icon(96), "Free Coins",
+	return _list_card(_make_coin_icon(96), "Earn Coins",
 		_sub_label("Watch a short ad", Color(0.66, 0.71, 0.85)), act, false)
 
 func _shield_card() -> PanelContainer:

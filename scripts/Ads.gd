@@ -22,7 +22,7 @@ signal ads_removed_changed(removed: bool)
 ## Keep true while developing so Google's TEST ads are served. Set to false for
 ## the production build so your real ad units are used (serving real ads on a
 ## debug build risks an AdMob policy strike).
-const USE_TEST_ADS := true
+const USE_TEST_ADS := false
 
 # Google's official sample ad unit IDs -- safe to use during development.
 const TEST_INTERSTITIAL_ID := "ca-app-pub-3940256099942544/1033173712"
